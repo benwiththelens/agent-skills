@@ -5,13 +5,15 @@ author: "Ben Weber (@benwiththelens) & VANTAGE"
 license: MIT
 ---
 
-# Jules Dispatch
+# Jules Dispatch & Notifier
 
-A lean, self-contained queue dispatcher for [Google Jules](https://jules.google.com),
+A lean, self-contained automation suite for [Google Jules](https://jules.google.com),
 Google's asynchronous coding agent. Write a Markdown **task spec**, drop it in a
 queue folder, and run the dispatcher — it validates the spec, resolves the target
 GitHub repo against your connected Jules sources, creates a session, tracks state,
-and archives the processed spec. No frameworks, no npm dependencies, no lock-in.
+and archives the processed spec. The accompanying **notifier & orchestrator** continuously
+monitors active sessions, alerts Discord on state transitions (`AWAITING_USER_FEEDBACK`, `REQUIRES_APPROVAL`, `COMPLETED`),
+and triggers automated subagent turns to resolve pending questions or plan approvals. No frameworks, no npm dependencies, no lock-in.
 
 ## Requirements
 
@@ -61,6 +63,15 @@ file paths, acceptance criteria, and edge cases.
 ```bash
 # Dispatch everything pending in the queue
 JULES_API_KEY=... node jules_dispatcher.mjs
+
+# Run session state notifier & orchestrator sweep
+node jules_notifier.mjs
+
+# CLI interactions with Jules sessions
+node jules_client.mjs list-sessions
+node jules_client.mjs get-session <sessionId>
+node jules_client.mjs send-message <sessionId> "response"
+node jules_client.mjs approve-plan <sessionId>
 
 # Test run — validates specs & source resolution without calling the API
 node jules_dispatcher.mjs --dry-run
