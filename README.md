@@ -20,6 +20,28 @@ and they become available on demand.
 
 ---
 
+## 🚀 Featured: Autonomous Jules Pipeline v2
+
+The `jules-dispatch` skill has been upgraded to **v2** — a fully autonomous,
+event-driven development architecture for Google Jules. Key capabilities:
+
+- **Graphify AST Enrichment:** Prompts are injected with exact Abstract Syntax
+  Tree (AST) node dependencies, types, and file relationships — no more blind
+  codebase dumps.
+- **Rate-Limit Safety Buffers:** Daily automated cap (80/100) with a
+  20-session manual reserve buffer to prevent quota exhaustion.
+- **Autonomous Feedback Resolution:** When Jules pauses for feedback or plan
+  approval, an OpenClaw subagent inspects the git patch, resolves the blocker,
+  and approves execution.
+- **Kimi k3 / Multi-Model Audit Gatekeeping:** PRs are never blindly trusted.
+  High-reasoning models (`moonshot/kimi-k3`, `gemini-3.7-flash`) audit diffs
+  for security, compliance, and logic before merge.
+
+See [`original/jules-dispatch/DESIGN_SPEC.md`](original/jules-dispatch/DESIGN_SPEC.md)
+for the full architecture specification.
+
+---
+
 ## 📦 Repository Layout
 
 ```
@@ -83,7 +105,7 @@ openclaw skills check
 
 | Skill             | Path                        | Description                                                        |
 | ----------------- | --------------------------- | ------------------------------------------------------------------ |
-| `jules-dispatch`  | `original/jules-dispatch/`  | Dispatch coding tasks to Google's Jules async agent and track results. |
+| `jules-dispatch`  | `original/jules-dispatch/`  | Autonomous Jules Pipeline v2 — queue-based async dispatcher with Graphify AST enrichment, rate-limit safety buffers, autonomous feedback resolution, and Kimi k3 / multi-model audit gatekeeping. |
 | `server-ops`      | `original/server-ops/`      | Headless server/container operations: health, logs, Docker lifecycle.  |
 | `catalyst-ingest` | `original/catalyst-ingest/` | Structured ingestion pipeline for raw captures into the knowledge vault. |
 

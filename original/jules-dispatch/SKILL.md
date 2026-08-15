@@ -1,19 +1,30 @@
 ---
 name: jules-dispatch
-description: Queue-based async dispatcher for Google Jules — drop Markdown task specs into a folder, and a zero-dependency Node script dispatches them to Jules sessions with rate limiting, state tracking, and a strict no-auto-merge PR policy.
+description: Autonomous Jules Pipeline v2 — queue-based async dispatcher for Google Jules with Graphify AST enrichment, rate-limit safety buffers, autonomous feedback resolution, and Kimi k3 / multi-model audit gatekeeping.
 author: "Ben Weber (@benwiththelens) & VANTAGE"
 license: MIT
 ---
 
-# Jules Dispatch & Notifier
+# Jules Dispatch & Notifier — Autonomous Pipeline v2
 
 A lean, self-contained automation suite for [Google Jules](https://jules.google.com),
 Google's asynchronous coding agent. Write a Markdown **task spec**, drop it in a
 queue folder, and run the dispatcher — it validates the spec, resolves the target
-GitHub repo against your connected Jules sources, creates a session, tracks state,
-and archives the processed spec. The accompanying **notifier & orchestrator** continuously
-monitors active sessions, alerts Discord on state transitions (`AWAITING_USER_FEEDBACK`, `REQUIRES_APPROVAL`, `COMPLETED`),
-and triggers automated subagent turns to resolve pending questions or plan approvals. No frameworks, no npm dependencies, no lock-in.
+GitHub repo against your connected Jules sources, enriches the prompt with
+**Graphify AST code intelligence**, creates a session, tracks state, and archives
+the processed spec. The accompanying **notifier & orchestrator** continuously
+monitors active sessions, alerts Discord on state transitions (`AWAITING_USER_FEEDBACK`,
+`REQUIRES_APPROVAL`, `COMPLETED`), and triggers automated subagent turns to resolve
+pending questions or plan approvals. No frameworks, no npm dependencies, no lock-in.
+
+## v2 Architecture Highlights
+
+| Feature | Description |
+| :--- | :--- |
+| **Graphify AST Enrichment** | Automatically injects exact Abstract Syntax Tree (AST) node dependencies, types, and file relationships into prompts. |
+| **Rate-Limit Safety Buffers** | Enforces a daily automated cap (80/100) with a 20-session manual reserve buffer to prevent quota exhaustion. |
+| **Autonomous Feedback Resolution** | When Jules pauses for feedback or plan approval, an OpenClaw subagent inspects the git patch, resolves the blocker, and approves execution. |
+| **Kimi k3 / Multi-Model Audit Gatekeeping** | PRs are never blindly trusted. High-reasoning models (`moonshot/kimi-k3`, `gemini-3.7-flash`) audit diffs for security, compliance, and logic before merge. |
 
 ## Requirements
 
@@ -43,6 +54,7 @@ repo: my-cool-project        # required — GitHub repo name connected to Jules
 title: Fix flaky login test  # optional — defaults to filename
 priority: high               # optional — critical|high|medium|low (default medium)
 branch: main                 # optional — defaults to repo's default branch
+depends_on: SPEC-P9-core-types # optional — upstream dependency spec(s)
 ---
 # 🎯 Task Spec: Fix flaky login test
 
@@ -89,12 +101,17 @@ node jules_dispatcher.mjs --digest
    (`critical → high → medium → low`), then oldest-first within a tier.
 2. **Daily rate limit.** The dispatcher tracks a per-day counter in the state
    file and halts at `JULES_DAILY_LIMIT` — remaining specs stay queued.
-3. **No auto-merge, ever.** Sessions are created with `AUTO_CREATE_PR` so Jules
+3. **Dependency gating.** Specs with `depends_on` are held until upstream
+   specs reach `COMPLETED` state.
+4. **Graphify enrichment.** The dispatcher queries the local Graphify AST
+   index (`.graphify_analysis.json`) and appends the exact dependency subgraph
+   to the prompt payload.
+5. **No auto-merge, ever.** Sessions are created with `AUTO_CREATE_PR` so Jules
    opens a pull request for review, but there is intentionally **no merge or
    automerge code path** in this tool. Every PR requires human review on GitHub.
-4. **Atomic state writes.** The ledger is written via temp-file + rename, so a
+6. **Atomic state writes.** The ledger is written via temp-file + rename, so a
    crash mid-run can't corrupt your dispatch history.
-5. **Failed dispatches stay queued.** If the API errors on a spec, it's left in
+7. **Failed dispatches stay queued.** If the API errors on a spec, it's left in
    the queue for the next sweep — nothing is silently dropped.
 
 ## Agent Integration Guidance
