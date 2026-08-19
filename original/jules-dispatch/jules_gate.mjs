@@ -1,16 +1,28 @@
 #!/usr/bin/env node
 /**
- * jules-gate.mjs
- * Lightweight zero-LLM trigger gate for OpenClaw cron.
- * Returns { fire: true } ONLY when a Jules session has completed/failed or
- * when new specs need to be generated for the next phase.
+ * jules_gate.mjs
+ *
+ * ⚠️  STATUS: DORMANT — Not registered in any active cron job.
+ *
+ * This was originally designed as a lightweight zero-LLM trigger gate
+ * for OpenClaw cron, returning { fire: true } when a Jules session
+ * completed/failed or when new specs needed generation.
+ *
+ * Its functionality is now fully covered by jules_notifier.mjs which
+ * runs every 5 minutes and handles all session state transitions.
+ *
+ * Retained for reference only. Do not schedule without removing the
+ * hardcoded repo filters and reconciling with the notifier's unified
+ * state check.
+ *
+ * @deprecated Superseded by jules_notifier.mjs
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { getSession } from './jules-client.mjs';
+import { getSession } from './jules_client.mjs';
 
 async function checkGate() {
-  const STATE_FILE = '/home/node/.openclaw/workspace/jules-state.json';
+  const STATE_FILE = process.env.JULES_STATE_PATH || '/home/node/.openclaw/workspace/jules-state.json';
   if (!existsSync(STATE_FILE)) {
     console.log(JSON.stringify({ fire: false, reason: 'No jules-state.json file' }));
     return;
@@ -23,20 +35,17 @@ async function checkGate() {
     let reason = '';
 
     for (const [id, sessionData] of Object.entries(sessions)) {
-      if (sessionData.repo === 'gs1-link-engine' || sessionData.title?.includes('GS1') || sessionData.title?.includes('Phase')) {
-        try {
-          const liveSess = await getSession(id);
-          // If a session finished or created a PR that has not been merged/processed yet
-          if (liveSess.state === 'SUCCEEDED' || liveSess.state === 'COMPLETED' || liveSess.state === 'FAILED') {
-            if (!sessionData.processedOvernight) {
-              needsAction = true;
-              reason = `Session ${id} finished with state ${liveSess.state}`;
-              break;
-            }
+      try {
+        const liveSess = await getSession(id);
+        if (liveSess.state === 'SUCCEEDED' || liveSess.state === 'COMPLETED' || liveSess.state === 'FAILED') {
+          if (!sessionData.processedOvernight) {
+            needsAction = true;
+            reason = `Session ${id} finished with state ${liveSess.state}`;
+            break;
           }
-        } catch (e) {
-          // Ignore network errors on poll
         }
+      } catch (e) {
+        // Ignore network errors on poll
       }
     }
 

@@ -20,22 +20,17 @@ and they become available on demand.
 
 ---
 
-## 🚀 Featured: Autonomous Jules Pipeline v2
+## 🚀 Featured: Autonomous Jules Pipeline v2+
 
-The `jules-dispatch` skill has been upgraded to **v2** — a fully autonomous,
-event-driven development architecture for Google Jules. Key capabilities:
+The `jules-dispatch` skill provides a complete, event-driven development
+architecture for [Google Jules](https://jules.google.com). Key capabilities:
 
-- **Graphify AST Enrichment:** Prompts are injected with exact Abstract Syntax
-  Tree (AST) node dependencies, types, and file relationships — no more blind
-  codebase dumps.
-- **Rate-Limit Safety Buffers:** Daily automated cap (80/100) with a
-  20-session manual reserve buffer to prevent quota exhaustion.
-- **Autonomous Feedback Resolution:** When Jules pauses for feedback or plan
-  approval, an OpenClaw subagent inspects the git patch, resolves the blocker,
-  and approves execution.
-- **Kimi k3 / Multi-Model Audit Gatekeeping:** PRs are never blindly trusted.
-  High-reasoning models (`moonshot/kimi-k3`, `gemini-3.7-flash`) audit diffs
-  for security, compliance, and logic before merge.
+- **Graphify AST Code Intelligence:** Automatically queries TypeScript AST indexes and injects exact symbols, type exports, and file dependencies into prompts.
+- **Queue Dispatcher & Quota Governor:** Enforces daily safety caps (80/100) with a 20-session manual reserve, priority ordering (`critical → high → medium → low`), and `depends_on` prerequisite gating.
+- **Autonomous Feedback Resolution:** When Jules pauses for user input or plan approvals, an automated subagent inspects the git patch and resolves blockers via a resilient model fallback chain (`gemini-3.5-flash-lite` → `kimi-k3`).
+- **Summary-State Polling Optimization:** The notifier checks summary state flags to skip redundant API calls for terminal sessions, minimizing latency and quota usage.
+- **Multi-Model Audit & Merge Gatekeeper:** 3-phase automated gatekeeper with high-reasoning security audits, blast-radius human review triggers (CI/CD, secrets, auth), automatic lockfile conflict healing, full monorepo test enforcement (`npm test`), auto-merging, and rollback tagging.
+- **Unified State Engine & Rolling Compaction:** Atomic state updates, sub-50KB active state footprint, and monthly history archiving.
 
 See [`original/jules-dispatch/DESIGN_SPEC.md`](original/jules-dispatch/DESIGN_SPEC.md)
 for the full architecture specification.
@@ -48,6 +43,15 @@ for the full architecture specification.
 agent-skills/
 ├── original/        # Skills authored from scratch by benwiththelens
 │   ├── jules-dispatch/
+│   │   ├── SKILL.md                 # Entrypoint documentation
+│   │   ├── DESIGN_SPEC.md            # Comprehensive architecture specification
+│   │   ├── jules_dispatcher.mjs      # Queue dispatcher & AST enricher
+│   │   ├── jules_notifier.mjs        # Session monitor & feedback orchestrator
+│   │   ├── jules_merge_gatekeeper.mjs# LLM security audit, test runner & auto-merge
+│   │   ├── jules_state_manager.mjs   # Atomic state engine & rolling compaction
+│   │   ├── jules_client.mjs          # Zero-dependency Google Jules API client
+│   │   ├── jules_discord.mjs         # Shared Discord alerting transport
+│   │   └── jules_gate.mjs            # Dormant trigger gate (superseded by notifier)
 │   ├── server-ops/
 │   └── catalyst-ingest/
 ├── curated/         # Community skills, reviewed & hardened
@@ -57,7 +61,7 @@ agent-skills/
 │   └── obsidian-skills/
 ├── scripts/         # Maintenance / sync / validation tooling
 ├── install.sh       # One-shot installer (symlink or copy)
-└── README.md        # You are here
+└── README.md        # Master repository index
 ```
 
 ---
@@ -105,7 +109,7 @@ openclaw skills check
 
 | Skill             | Path                        | Description                                                        |
 | ----------------- | --------------------------- | ------------------------------------------------------------------ |
-| `jules-dispatch`  | `original/jules-dispatch/`  | Autonomous Jules Pipeline v2 — queue-based async dispatcher with Graphify AST enrichment, rate-limit safety buffers, autonomous feedback resolution, and Kimi k3 / multi-model audit gatekeeping. |
+| `jules-dispatch`  | `original/jules-dispatch/`  | Autonomous Jules Pipeline v2+ — queue dispatcher with Graphify AST, quota governor, subagent feedback orchestrator, rolling state compaction, and multi-model audit & merge gatekeeping. |
 | `server-ops`      | `original/server-ops/`      | Headless server/container operations: health, logs, Docker lifecycle.  |
 | `catalyst-ingest` | `original/catalyst-ingest/` | Structured ingestion pipeline for raw captures into the knowledge vault. |
 
