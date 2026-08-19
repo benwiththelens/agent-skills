@@ -14,7 +14,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 
-const WORKSPACE = process.env.WORKSPACE || '/home/node/.openclaw/workspace';
+const WORKSPACE = process.env.WORKSPACE || process.cwd();
 const STATE_PATH = process.env.JULES_STATE_PATH || join(WORKSPACE, 'jules-state.json');
 const ARCHIVE_DIR = process.env.JULES_ARCHIVE_DIR || join(WORKSPACE, 'vault/02-ARCHIVE/jules-history');
 const STATE_SCHEMA_VERSION = 2;

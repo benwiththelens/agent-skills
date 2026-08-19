@@ -19,10 +19,12 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { getSession } from './jules_client.mjs';
 
 async function checkGate() {
-  const STATE_FILE = process.env.JULES_STATE_PATH || '/home/node/.openclaw/workspace/jules-state.json';
+  const WORKSPACE = process.env.WORKSPACE || process.cwd();
+  const STATE_FILE = process.env.JULES_STATE_PATH || join(WORKSPACE, 'jules-state.json');
   if (!existsSync(STATE_FILE)) {
     console.log(JSON.stringify({ fire: false, reason: 'No jules-state.json file' }));
     return;

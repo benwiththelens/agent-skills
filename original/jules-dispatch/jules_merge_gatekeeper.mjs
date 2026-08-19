@@ -33,80 +33,34 @@ import { loadState, saveState, getPendingPrs } from './jules_state_manager.mjs';
 // ==========================================
 // Configuration
 // ==========================================
-const WORKSPACE = process.env.WORKSPACE || '/home/node/.openclaw/workspace';
-const GITHUB_CREDENTIALS_PATH = process.env.GITHUB_CREDENTIALS_PATH || '/home/node/.openclaw/credentials/github.json';
-const GOOGLE_CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH || '/home/node/.openclaw/credentials/google.json';
-const OPENROUTER_CREDENTIALS_PATH = process.env.OPENROUTER_CREDENTIALS_PATH || '/home/node/.openclaw/credentials/openrouter.json';
-const BEN_DISCORD_ID = process.env.DISCORD_USER_ID || '387770515286392847';
+const HOME = process.env.HOME || process.env.USERPROFILE || '';
+const WORKSPACE = process.env.WORKSPACE || process.cwd();
+const GITHUB_CREDENTIALS_PATH = process.env.GITHUB_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/github.json') : '');
+const GOOGLE_CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/google.json') : '');
+const OPENROUTER_CREDENTIALS_PATH = process.env.OPENROUTER_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/openrouter.json') : '');
+const DISCORD_USER_ID = process.env.DISCORD_USER_ID || '';
 
-// Per-repo merge policies
-const REPO_POLICIES = {
-  'benwiththelens/gs1-link-engine': {
+// Load repo merge policies from environment, external JSON config, or default template
+let REPO_POLICIES = {
+  'owner/example-repo': {
     policy: 'AUTO_MERGE',
-    repoPath: join(WORKSPACE, 'gs1-link-engine-repo'),
-    buildCommand: 'npm run build:packages',
-    testCommand: 'npm test',
-    maxAutoMergesPerDay: 20,
-    requireTests: true,
-    requireAudit: true
-  },
-  'benwiththelens/scaffold': {
-    policy: 'AUTO_MERGE',
-    repoPath: join(WORKSPACE, 'scaffold-repo'),
+    repoPath: join(WORKSPACE, 'example-repo'),
     buildCommand: 'npm run build',
     testCommand: 'npm test',
     maxAutoMergesPerDay: 20,
     requireTests: true,
     requireAudit: true
-  },
-  'benwiththelens/Fabrik8OS': {
-    policy: 'AUTO_MERGE',
-    repoPath: join(WORKSPACE, 'Fabrik8OS-repo'),
-    buildCommand: 'npm run build',
-    testCommand: null,
-    maxAutoMergesPerDay: 20,
-    requireTests: false,
-    requireAudit: true
-  },
-  'benwiththelens/LotEngine': {
-    policy: 'AUTO_MERGE',
-    repoPath: join(WORKSPACE, 'LotEngine-repo'),
-    buildCommand: 'npm run build',
-    testCommand: null,
-    maxAutoMergesPerDay: 20,
-    requireTests: false,
-    requireAudit: true
-  },
-  'benwiththelens/ez-boat-numbers': {
-    policy: 'AUTO_MERGE',
-    repoPath: join(WORKSPACE, 'sovereign-cut-co'),
-    buildCommand: 'npm run build',
-    testCommand: 'npm run test:e2e',
-    maxAutoMergesPerDay: 20,
-    requireTests: true,
-    requireAudit: true
-  },
-  'benwiththelens/ebbers-construction-website': {
-    policy: 'HUMAN_REVIEW',
-    repoPath: join(WORKSPACE, 'ebbers-construction-website-repo'),
-    buildCommand: 'npm run build',
-    testCommand: null,
-    maxAutoMergesPerDay: 0,
-    requireTests: false,
-    requireAudit: false,
-    note: 'Client-facing site — manual review'
-  },
-  'benwiththelens/BenWeberPortfolio': {
-    policy: 'HUMAN_REVIEW',
-    repoPath: null,
-    buildCommand: null,
-    testCommand: null,
-    maxAutoMergesPerDay: 0,
-    requireTests: false,
-    requireAudit: false,
-    note: 'Personal portfolio — manual review'
   }
 };
+
+const POLICIES_FILE = process.env.REPO_POLICIES_CONFIG || join(WORKSPACE, 'repo-policies.json');
+if (existsSync(POLICIES_FILE)) {
+  try {
+    REPO_POLICIES = JSON.parse(readFileSync(POLICIES_FILE, 'utf8'));
+  } catch (e) {
+    console.warn(`[Gatekeeper] Failed to parse repo policies from ${POLICIES_FILE}: ${e.message}`);
+  }
+}
 
 // Hard human review triggers (strict blast-radius files)
 const HUMAN_REVIEW_TRIGGERS = [
@@ -140,34 +94,34 @@ function log(level, msg, data) {
 // ==========================================
 // GitHub API Client
 // ==========================================
-let GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+let GITHUB_TOKEN = proces…OKEN || '';
 if (!GITHUB_TOKEN) {
   try {
-    if (existsSync(GITHUB_CREDENTIALS_PATH)) {
+    if (GITHUB_CREDENTIALS_PATH && existsSync(GITHUB_CREDENTIALS_PATH)) {
       const creds = JSON.parse(readFileSync(GITHUB_CREDENTIALS_PATH, 'utf8'));
-      GITHUB_TOKEN = creds.githubToken || creds.token || '';
+      GITHUB_TOKEN = *** || creds.token || '';
     }
   } catch (e) {
     log('error', `Failed to load GitHub credentials: ${e.message}`);
   }
 }
 
-let GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
+let GOOGLE_API_KEY = proces…_KEY || '';
 if (!GOOGLE_API_KEY) {
   try {
-    if (existsSync(GOOGLE_CREDENTIALS_PATH)) {
-      GOOGLE_API_KEY = JSON.parse(readFileSync(GOOGLE_CREDENTIALS_PATH, 'utf8')).apiKey || '';
+    if (GOOGLE_CREDENTIALS_PATH && existsSync(GOOGLE_CREDENTIALS_PATH)) {
+      GOOGLE_API_KEY = JSON.p…ATH, 'utf8')).apiKey || '';
     }
   } catch (e) {
     log('warn', `Failed to load Google credentials: ${e.message}`);
   }
 }
 
-let OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+let OPENROUTER_API_KEY = proces…_KEY || '';
 if (!OPENROUTER_API_KEY) {
   try {
-    if (existsSync(OPENROUTER_CREDENTIALS_PATH)) {
-      OPENROUTER_API_KEY = JSON.parse(readFileSync(OPENROUTER_CREDENTIALS_PATH, 'utf8')).apiKey || '';
+    if (OPENROUTER_CREDENTIALS_PATH && existsSync(OPENROUTER_CREDENTIALS_PATH)) {
+      OPENROUTER_API_KEY = JSON.p…ATH, 'utf8')).apiKey || '';
     }
   } catch (e) {
     log('warn', `Failed to load OpenRouter credentials: ${e.message}`);
@@ -182,7 +136,7 @@ async function githubFetch(path, options = {}) {
   const headers = {
     'Authorization': `token ${GITHUB_TOKEN}`,
     'Accept': 'application/vnd.github.v3+json',
-    'User-Agent': 'VANTAGE-Gatekeeper',
+    'User-Agent': 'Agent-Merge-Gatekeeper',
     ...options.headers
   };
 
@@ -227,7 +181,7 @@ async function getPrDiff(repo, prNumber, prBranch, repoPath) {
     headers: {
       'Authorization': `token ${GITHUB_TOKEN}`,
       'Accept': 'application/vnd.github.v3.diff',
-      'User-Agent': 'VANTAGE-Gatekeeper'
+      'User-Agent': 'Agent-Merge-Gatekeeper'
     }
   });
   if (!response.ok) throw new Error(`Failed to fetch PR diff from GitHub: ${response.status}`);
@@ -254,12 +208,16 @@ function extractFilesFromDiff(diff) {
 // Discord DM
 // ==========================================
 async function sendDiscordDM(text) {
+  if (!DISCORD_USER_ID) {
+    log('info', 'No DISCORD_USER_ID configured; skipping DM alert');
+    return false;
+  }
   try {
     execFileSync('openclaw', [
       'message',
       'send',
       '--target',
-      `user:${BEN_DISCORD_ID}`,
+      `user:${DISCORD_USER_ID}`,
       '--message',
       text
     ]);
@@ -309,16 +267,16 @@ function generateEscalationBriefing({ repoName, prNumber, prTitle, prUrl, reason
 > **Verdict:** \`${auditResult?.verdict || 'NEEDS_HUMAN_REVIEW'}\`
 > **Link:** ${prUrl}
 
-📋 **Why This Needs Your Review:**
+📋 **Why This Needs Human Review:**
 ${explanation}
 
 📁 **Files Changed:**
 ${changedFileList}
 
 💡 **Actionable Next Steps:**
-1. **Approve & Merge:** If these changes are intentional, merge directly on GitHub: ${prUrl}
-2. **Request Jules Revision:** Instruct VANTAGE to dispatch feedback to the session.
-3. **Reject/Close:** If this approach is flawed, close the PR directly on GitHub.`;
+1. **Approve & Merge:** If intentional, merge directly on GitHub: ${prUrl}
+2. **Request Revision:** Dispatch feedback to the Jules session.
+3. **Reject/Close:** If this approach is flawed, close the PR on GitHub.`;
 }
 
 /**
@@ -328,7 +286,7 @@ async function callLlmAudit(prompt) {
   // 1. Primary: Direct Google Gemini 2.5 Flash API
   if (GOOGLE_API_KEY) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GOOGLE_API_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=***}`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

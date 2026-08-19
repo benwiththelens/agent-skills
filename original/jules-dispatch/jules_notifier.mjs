@@ -11,7 +11,9 @@
  * Orchestrated by VANTAGE co-pilot on Cato.
  */
 
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import dns from 'dns';
 import { getSession, listSessions } from './jules_client.mjs';
@@ -37,9 +39,21 @@ dns.lookup = function (hostname, options, callback) {
   return originalLookup(hostname, options, callback);
 };
 
-const JULES_API_KEY = process.env.JULES_API_KEY;
+const HOME = process.env.HOME || process.env.USERPROFILE || '';
+const CREDENTIALS_PATH = process.env.JULES_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/jules.json') : '');
+
+let config = {};
+if (CREDENTIALS_PATH && existsSync(CREDENTIALS_PATH)) {
+  try {
+    config = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf8'));
+  } catch (e) {
+    // ignore
+  }
+}
+
+const JULES_API_KEY = process.env.JULES_API_KEY || config.apiKey || '';
 if (!JULES_API_KEY) {
-  console.error('[Jules Notifier] Error: JULES_API_KEY environment variable is required.');
+  console.error('[Jules Notifier] Error: JULES_API_KEY environment variable (or credentials file) is required.');
   process.exit(1);
 }
 
@@ -64,16 +78,16 @@ let savedState = loadState();
  * retries on the next 5-minute sweep. Sessions are never permanently stuck.
  */
 async function triggerOrchestrator(id) {
-  const taskPath = `/tmp/jules-task-${id}.txt`;
-  const taskContent = `You are VANTAGE's autonomous Jules Feedback Orchestrator.
+  const taskPath = join(tmpdir(), `jules-task-${id}.txt`);
+  const taskContent = `You are the autonomous Jules Feedback Orchestrator.
 A Google Jules coding session requires feedback, clarification, or plan approval.
 
 Session ID: ${id}
 
 Instructions:
-1. Run \`node scripts/jules-client.mjs get-session ${id}\` (or inspect session details) to read the conversation and understand what Jules is asking.
-2. If Jules presents an implementation plan awaiting approval, review the proposed plan against the original objective. If sound, run \`node scripts/jules-client.mjs approve-plan ${id}\`.
-3. If Jules is asking a specific technical clarification, provide a direct, unambiguous code or architecture answer using \`node scripts/jules-client.mjs send-message ${id} "<your answer>"\`.
+1. Run \`node jules_client.mjs get-session ${id}\` (or inspect session details) to read the conversation and understand what Jules is asking.
+2. If Jules presents an implementation plan awaiting approval, review the proposed plan against the original objective. If sound, run \`node jules_client.mjs approve-plan ${id}\`.
+3. If Jules is asking a specific technical clarification, provide a direct, unambiguous code or architecture answer using \`node jules_client.mjs send-message ${id} "<your answer>"\`.
 4. Output a brief 1-line summary of the decision made once resolved.
 `;
 

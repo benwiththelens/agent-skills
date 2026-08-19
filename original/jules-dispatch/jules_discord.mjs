@@ -1,20 +1,17 @@
 #!/usr/bin/env node
 /**
- * jules-discord.mjs
+ * jules_discord.mjs
  * Shared Discord alerting helper for the Jules pipeline.
  *
- * Used by:
- *   - jules-queue-dispatcher.mjs (per-job dispatch + daily digest notifications)
- *   - jules-notifier.mjs         (per-job session state transition notifications)
- *
  * Delivery strategy:
- *   1. Discord webhook (from ~/.openclaw/credentials/jules.json -> webhookUrl)
- *   2. Fallback: OpenClaw CLI `openclaw message send` to the #jules channel
+ *   1. Direct Discord webhook (DISCORD_WEBHOOK_URL or ~/.openclaw/credentials/jules.json -> webhookUrl)
+ *   2. Fallback: OpenClaw CLI `openclaw message send` to DISCORD_CHANNEL_ID
  *
- * Orchestrated by VANTAGE co-pilot on Cato.
+ * Zero external dependencies · Node.js 18+
  */
 
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { execFileSync } from 'child_process';
 import dns from 'dns';
 
@@ -33,18 +30,23 @@ dns.lookup = function (hostname, options, callback) {
   return originalLookup(hostname, options, callback);
 };
 
-const CREDENTIALS_PATH = '/home/node/.openclaw/credentials/jules.json';
-const DISCORD_CHANNEL = '1527898781960507463';
+const HOME = process.env.HOME || process.env.USERPROFILE || '';
+const CREDENTIALS_PATH = process.env.JULES_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/jules.json') : '');
 
 let config = {};
-try {
-  config = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf8'));
-} catch (e) {
-  console.error(`[Jules Discord] Failed to load credentials from ${CREDENTIALS_PATH}:`, e.message);
+if (CREDENTIALS_PATH && existsSync(CREDENTIALS_PATH)) {
+  try {
+    config = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf8'));
+  } catch (e) {
+    console.error(`[Jules Discord] Failed to load credentials from ${CREDENTIALS_PATH}:`, e.message);
+  }
 }
 
+const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || config.webhookUrl || '';
+const DISCORD_CHANNEL = process.env.DISCORD_CHANNEL_ID || config.discordChannelId || '';
+
 /**
- * Send a message to the #jules Discord channel.
+ * Send a message to Discord.
  * Tries the configured webhook first, falls back to the OpenClaw CLI.
  * Never throws — notification failures are logged and swallowed so they
  * cannot break dispatch/monitoring flows.
@@ -53,10 +55,9 @@ try {
  * @returns {Promise<boolean>} true if delivered via either transport
  */
 export async function sendDiscordAlert(text) {
-  const webhookUrl = config.webhookUrl;
-  if (webhookUrl) {
+  if (WEBHOOK_URL) {
     try {
-      const response = await fetch(webhookUrl, {
+      const response = await fetch(WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text })
@@ -71,19 +72,24 @@ export async function sendDiscordAlert(text) {
     }
   }
 
-  try {
-    execFileSync('openclaw', [
-      'message',
-      'send',
-      '--target',
-      `channel:${DISCORD_CHANNEL}`,
-      '--message',
-      text
-    ]);
-    console.log('[Jules Discord] Sent CLI alert.');
-    return true;
-  } catch (error) {
-    console.error('[Jules Discord] CLI alert failed:', error.message);
-    return false;
+  if (DISCORD_CHANNEL) {
+    try {
+      execFileSync('openclaw', [
+        'message',
+        'send',
+        '--target',
+        `channel:${DISCORD_CHANNEL}`,
+        '--message',
+        text
+      ]);
+      console.log('[Jules Discord] Sent CLI alert.');
+      return true;
+    } catch (error) {
+      console.error('[Jules Discord] CLI alert failed:', error.message);
+      return false;
+    }
   }
+
+  // No webhook or channel configured
+  return false;
 }

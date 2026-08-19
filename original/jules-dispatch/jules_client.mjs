@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * jules-client.mjs
+ * jules_client.mjs
  * Programmatic REST client and CLI interface for the Google Jules API.
- * Orchestrated by VANTAGE co-pilot on Cato.
+ * Zero external dependencies · Node.js 18+
  */
 
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import dns from 'dns';
 
@@ -24,21 +24,24 @@ dns.lookup = function(hostname, options, callback) {
   return originalLookup(hostname, options, callback);
 };
 
-// Load credentials
-const CREDENTIALS_PATH = '/home/node/.openclaw/credentials/jules.json';
+// Load credentials from env var or credentials file
+const HOME = process.env.HOME || process.env.USERPROFILE || '';
+const CREDENTIALS_PATH = process.env.JULES_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/jules.json') : '');
+
 let config = {};
-try {
-  config = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf8'));
-} catch (e) {
-  console.error(`[Jules Client] Failed to load credentials from ${CREDENTIALS_PATH}:`, e.message);
-  process.exit(1);
+if (CREDENTIALS_PATH && existsSync(CREDENTIALS_PATH)) {
+  try {
+    config = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf8'));
+  } catch (e) {
+    console.error(`[Jules Client] Failed to load credentials from ${CREDENTIALS_PATH}:`, e.message);
+  }
 }
 
-const API_KEY = config.apiKey;
-const ENDPOINT = config.endpoint || 'https://jules.googleapis.com/v1alpha';
+const API_KEY = process.env.JULES_API_KEY || config.apiKey || '';
+const ENDPOINT = process.env.JULES_API_ENDPOINT || config.endpoint || 'https://jules.googleapis.com/v1alpha';
 
 if (!API_KEY) {
-  console.error('[Jules Client] Error: API Key missing from jules.json');
+  console.error('[Jules Client] Error: JULES_API_KEY environment variable is required.');
   process.exit(1);
 }
 
@@ -84,23 +87,40 @@ export async function listSources() {
 
 /**
  * Create a new Jules development session
- * @param {string} source - e.g. "sources/github/bobalover/boba"
- * @param {string} prompt - Instructions/goal for the session
- * @param {object} opts - Optional parameter overrides (e.g. startingBranch, automationMode, title, requirePlanApproval)
+ * @param {string|object} sourceOrOpts - e.g. "sources/github/owner/repo" or { source, prompt, ... }
+ * @param {string} [prompt] - Instructions/goal for the session
+ * @param {object} [opts] - Optional overrides (startingBranch, automationMode, title, requirePlanApproval)
  */
-export async function createSession(source, prompt, opts = {}) {
-  const payload = {
-    prompt,
-    sourceContext: {
-      source,
-      githubRepoContext: {
-        startingBranch: opts.startingBranch || 'main'
-      }
-    },
-    title: opts.title || 'VANTAGE Automated Session',
-    automationMode: opts.automationMode || 'AUTO_CREATE_PR',
-    requirePlanApproval: opts.requirePlanApproval !== undefined ? opts.requirePlanApproval : false
-  };
+export async function createSession(sourceOrOpts, prompt, opts = {}) {
+  let payload;
+  if (typeof sourceOrOpts === 'object' && sourceOrOpts !== null) {
+    const p = sourceOrOpts;
+    payload = {
+      prompt: p.prompt,
+      sourceContext: {
+        source: p.source,
+        githubRepoContext: {
+          startingBranch: p.startingBranch || 'main'
+        }
+      },
+      title: p.title || 'Automated Session',
+      automationMode: p.automationMode || (p.autoCreatePr !== false ? 'AUTO_CREATE_PR' : 'AUTOMATION_MODE_UNSPECIFIED'),
+      requirePlanApproval: p.requirePlanApproval !== undefined ? p.requirePlanApproval : false
+    };
+  } else {
+    payload = {
+      prompt,
+      sourceContext: {
+        source: sourceOrOpts,
+        githubRepoContext: {
+          startingBranch: opts.startingBranch || 'main'
+        }
+      },
+      title: opts.title || 'Automated Session',
+      automationMode: opts.automationMode || 'AUTO_CREATE_PR',
+      requirePlanApproval: opts.requirePlanApproval !== undefined ? opts.requirePlanApproval : false
+    };
+  }
 
   return await julesFetch('sessions', {
     method: 'POST',
@@ -119,7 +139,8 @@ export async function getSession(sessionId) {
 /**
  * List all sessions
  */
-export async function listSessions(pageSize = 10) {
+export async function listSessions(pageSizeOrOpts = 10) {
+  const pageSize = typeof pageSizeOrOpts === 'object' ? (pageSizeOrOpts.pageSize || 10) : pageSizeOrOpts;
   return await julesFetch(`sessions?pageSize=${pageSize}`);
 }
 
@@ -161,9 +182,9 @@ async function runCLI() {
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     console.log(`
-🤖 JULES API COMMAND LINE INTERFACE (VANTAGE)
+🤖 JULES API COMMAND LINE INTERFACE
 Usage:
-  node jules-client.mjs <command> [args]
+  node jules_client.mjs <command> [args]
 
 Commands:
   list-sources                                    List connected GitHub repos/sources
@@ -231,7 +252,7 @@ Commands:
         break;
       }
       default:
-        console.error(`Unknown command: ${command}. Run "node jules-client.mjs help" for details.`);
+        console.error(`Unknown command: ${command}. Run "node jules_client.mjs help" for details.`);
         process.exit(1);
     }
   } catch (error) {
@@ -241,6 +262,6 @@ Commands:
 }
 
 // Run if called directly
-if (process.argv[1] && process.argv[1].endsWith('jules-client.mjs')) {
+if (process.argv[1] && (process.argv[1].endsWith('jules_client.mjs') || process.argv[1].endsWith('jules-client.mjs'))) {
   runCLI();
 }

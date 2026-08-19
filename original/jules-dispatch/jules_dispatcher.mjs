@@ -31,10 +31,11 @@ import {
 // ==========================================
 // Configuration
 // ==========================================
-const WORKSPACE = process.env.WORKSPACE || '/home/node/.openclaw/workspace';
+const HOME = process.env.HOME || process.env.USERPROFILE || '';
+const WORKSPACE = process.env.WORKSPACE || process.cwd();
 const QUEUE_DIR = process.env.JULES_QUEUE_DIR || join(WORKSPACE, 'vault/01-ACTIVE/jules-queue');
 const PROCESSED_DIR = join(QUEUE_DIR, 'processed');
-const GRAPH_PATH = process.env.GRAPH_PATH || '/home/node/.graphify/global-graph.json';
+const GRAPH_PATH = process.env.GRAPH_PATH || (HOME ? join(HOME, '.graphify/global-graph.json') : '');
 
 const DAILY_HARD_LIMIT = parseInt(process.env.JULES_DAILY_HARD_LIMIT || '100', 10); // Google's hard cap
 const MANUAL_RESERVE_BUFFER = parseInt(process.env.JULES_MANUAL_RESERVE_BUFFER || '20', 10); // Reserved strictly for manual on-demand sessions
@@ -180,9 +181,8 @@ function buildGraphifyBlock(repoPath) {
     join(WORKSPACE, repoPath, 'graphify-out/.graphify_analysis.json'),
     join(WORKSPACE, repoPath + '-repo', 'graphify-out/.graphify_analysis.json'),
     join(WORKSPACE, shortRepo, 'graphify-out/.graphify_analysis.json'),
-    join(WORKSPACE, shortRepo + '-repo', 'graphify-out/.graphify_analysis.json'),
-    join(WORKSPACE, 'sovereign-cut-co/graphify-out/.graphify_analysis.json')
-  ];
+    join(WORKSPACE, shortRepo + '-repo', 'graphify-out/.graphify_analysis.json')
+  ].filter(Boolean);
 
   let raw = null;
   let usedPath = '';
@@ -286,7 +286,7 @@ function buildGraphifyBlock(repoPath) {
 // Source Resolution
 // ==========================================
 
-/** Resolve a repo_path (e.g. "Fabrik8OS", "benwiththelens/Fabrik8OS") to a Jules source name. */
+/** Resolve a repo_path (e.g. "my-repo", "owner/my-repo") to a Jules source name. */
 async function resolveSources() {
   const res = await listSources();
   const sources = res.sources || [];

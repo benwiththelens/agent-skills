@@ -17,14 +17,12 @@ One or two sentences: what you were doing -> what got in the way (a guess at the
 
 Do this proactively, in the moment, even though none of these are blocking—logged together they show where the repo needs sanding down. This is distinct from project logs (what you accomplished) and from real bugs / tracked work.
 
-## Usage (Windows)
-If you are running in the Windows Antigravity terminal, use the PowerShell command:
+## Usage (PowerShell / Windows)
 ```powershell
-C:\Users\benea\.gemini\antigravity-cli\papercut.ps1 "Your detailed complaint here"
+pwsh -File ./papercut.ps1 "Your detailed friction description here"
 ```
 
-## Usage (Cato / OpenClaw)
-If you are running as an agent inside OpenClaw or SSH'd into the Cato Linux environment, run the node script:
+## Usage (POSIX / Node.js)
 ```bash
-node /home/node/.openclaw/workspace/papercut.mjs "Your detailed complaint here"
+node ./papercut.mjs "Your detailed friction description here"
 ```
