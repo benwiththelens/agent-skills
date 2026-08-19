@@ -4,14 +4,11 @@
  * Next-Gen Jules Queue Dispatcher & Spec Enricher.
  *
  * Reads pending task specs from the vault queue, enriches prompts with the
- * Graphify codebase dependency subgraph, dispatches to the Jules API,
- * tracks state + daily rate limits, resolves dependencies, and archives processed specs.
+ * Graphify codebase dependency subgraph (enforcing a 10KB byte ceiling),
+ * dispatches to the Jules API, tracks state + daily rate limits under advisory file locking,
+ * resolves dependencies, and archives processed specs.
  *
- * Orchestrated by VANTAGE co-pilot on Cato.
- *
- * Usage:
- *   node jules_dispatcher.mjs [--dry-run] [--limit N] [--verbose]
- *   node jules_dispatcher.mjs --digest [--send]
+ * Zero external dependencies · Node.js 18+
  */
 
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, renameSync, statSync } from 'fs';
@@ -21,6 +18,7 @@ import { sendDiscordAlert } from './jules_discord.mjs';
 import {
   loadState,
   saveState,
+  withStateLock,
   isDependencySatisfied,
   getPendingPrs,
   STATE_PATH,
@@ -37,15 +35,10 @@ const QUEUE_DIR = process.env.JULES_QUEUE_DIR || join(WORKSPACE, 'vault/01-ACTIV
 const PROCESSED_DIR = join(QUEUE_DIR, 'processed');
 const GRAPH_PATH = process.env.GRAPH_PATH || (HOME ? join(HOME, '.graphify/global-graph.json') : '');
 
-const DAILY_HARD_LIMIT = parseInt(process.env.JULES_DAILY_HARD_LIMIT || '100', 10); // Google's hard cap
-const MANUAL_RESERVE_BUFFER = parseInt(process.env.JULES_MANUAL_RESERVE_BUFFER || '20', 10); // Reserved strictly for manual on-demand sessions
-const DAILY_SAFETY_LIMIT = parseInt(process.env.JULES_DAILY_LIMIT || String(DAILY_HARD_LIMIT - MANUAL_RESERVE_BUFFER), 10); // 80 automated background cap
+const DAILY_HARD_LIMIT = parseInt(process.env.JULES_DAILY_HARD_LIMIT || '100', 10);
+const MANUAL_RESERVE_BUFFER = parseInt(process.env.JULES_MANUAL_RESERVE_BUFFER || '20', 10);
+const DAILY_SAFETY_LIMIT = parseInt(process.env.JULES_DAILY_LIMIT || String(DAILY_HARD_LIMIT - MANUAL_RESERVE_BUFFER), 10);
 
-// ==========================================
-// Multi-Model / Kimi k3 Audit Policy
-// ==========================================
-// Jules opens PRs via AUTO_CREATE_PR. High-reasoning models perform automated
-// security & compliance audits on inbound PRs via jules_merge_gatekeeper.mjs.
 const PR_AUTO_MERGE_ENABLED = true;
 const PR_STATUS_AWAITING = 'KIMI_K3_AUDIT_REQUIRED';
 
@@ -63,12 +56,8 @@ let limitIdx = args.indexOf('--limit');
 let RUN_LIMIT = limitIdx !== -1 && args[limitIdx + 1] ? parseInt(args[limitIdx + 1], 10) : Infinity;
 if (isNaN(RUN_LIMIT) || RUN_LIMIT < 1) RUN_LIMIT = Infinity;
 
-// Priority ordering (higher index = higher priority)
 const PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
 
-// ==========================================
-// Logging
-// ==========================================
 function log(level, msg, data) {
   const ts = new Date().toISOString();
   const line = `[${ts}] [${level.toUpperCase()}] [Dispatcher] ${msg}`;
@@ -79,21 +68,15 @@ function log(level, msg, data) {
   }
 }
 
-// ==========================================
-// Time Helpers (America/Chicago)
-// ==========================================
 function chicagoToday() {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Chicago',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'
-  }).format(new Date()); // Returns "YYYY-MM-DD"
+  }).format(new Date());
 }
 
-// ==========================================
-// Frontmatter & Spec Parsing
-// ==========================================
 function parseSpecMetadata(raw) {
   const meta = {
     repo_path: '',
@@ -113,13 +96,11 @@ function parseSpecMetadata(raw) {
         inFrontmatter = true;
         continue;
       } else {
-        break; // end of frontmatter
+        break;
       }
     }
     if (inFrontmatter) {
-      if (l.startsWith('#') || !l.includes(':')) {
-        continue;
-      }
+      if (l.startsWith('#') || !l.includes(':')) continue;
       const m = l.match(/^([A-Za-z0-9_\-]+)\s*:\s*(.+)$/);
       if (m && ['repo_path', 'repo', 'title', 'priority', 'branch', 'startingbranch', 'depends_on', 'dependson', 'depends_on_pr', 'phase'].includes(m[1].toLowerCase())) {
         meta[m[1].toLowerCase().trim()] = m[2].trim().replace(/^["']|["']$/g, '');
@@ -130,7 +111,6 @@ function parseSpecMetadata(raw) {
   if (meta.repo && !meta.repo_path) meta.repo_path = meta.repo;
   if (meta.startingbranch && !meta.branch) meta.branch = meta.startingbranch;
 
-  // Parse dependencies into arrays
   const rawDep = meta.depends_on || meta.dependson || '';
   if (rawDep) {
     meta.depends_on_list = rawDep.split(',').map(s => s.trim().replace(/^\[|\]$/g, '').replace(/["']/g, '')).filter(Boolean);
@@ -147,7 +127,6 @@ function stripFrontmatter(raw) {
   const endIdx = lines.slice(startIdx + 1).findIndex(l => l.trim() === '---');
   if (endIdx === -1) return raw.trim();
 
-  // If there's frontmatter, slice after it, but also strip any leftover YAML lines
   const bodyLines = lines.slice(startIdx + 1 + endIdx + 1);
   return bodyLines
     .filter(l => {
@@ -159,21 +138,28 @@ function stripFrontmatter(raw) {
 }
 
 // ==========================================
-// Graphify AST Enrichment
+// Graphify AST Enrichment (10KB Hard Ceiling)
 // ==========================================
+const GRAPHIFY_BYTE_CEILING = 10240;
 
-/**
- * Extract a relevant AST subgraph from the Graphify knowledge index.
- * Looks for .graphify_analysis.json in the target repo directory or global cache.
- *
- * Returns a markdown string summarizing key files, types, and dependencies
- * so Jules starts with accurate architectural context.
- *
- * Tolerates various Graphify schema shapes:
- * - Nodes may be in `nodes` (dict or array) or `files` (dict or array).
- * - Graph edges may be in `graph.links`, `graph.edges`, or top-level
- * as { edges: [...] } or { relationships: [...] } with source/target/from/to.
- */
+function truncateGraphifyBlock(block, maxBytes) {
+  if (!block || block.length <= maxBytes) return block;
+  const lines = block.split('\n');
+  const result = [];
+  let currentBytes = 0;
+
+  for (const line of lines) {
+    const lineBytes = line.length + 1;
+    if (currentBytes + lineBytes > maxBytes - 120) {
+      result.push(`\n... (truncated to fit 10KB AST context budget)`);
+      break;
+    }
+    result.push(line);
+    currentBytes += lineBytes;
+  }
+  return result.join('\n');
+}
+
 function buildGraphifyBlock(repoPath) {
   const shortRepo = repoPath.includes('/') ? repoPath.split('/').pop() : repoPath;
   const candidates = [
@@ -203,7 +189,6 @@ function buildGraphifyBlock(repoPath) {
     return '';
   }
 
-  // Normalize nodes into an array of objects
   let nodes = [];
   if (Array.isArray(raw.nodes)) {
     nodes = raw.nodes;
@@ -219,7 +204,6 @@ function buildGraphifyBlock(repoPath) {
   const nodeRepo = n => (n.repo || n.repository || '').toLowerCase();
   const nodePath = n => (n.path || n.filePath || n.id || n.name || '');
 
-  // Match nodes belonging to this repo: explicit repo field, or path prefix heuristic
   const matched = nodes.filter(n => {
     const r = nodeRepo(n);
     const shortKey = shortRepo.toLowerCase();
@@ -233,7 +217,6 @@ function buildGraphifyBlock(repoPath) {
     return '';
   }
 
-  // Extract up to 15 key nodes sorted by symbol/export count
   const keyNodes = matched
     .sort((a, b) => {
       const aCount = (a.symbols?.length || 0) + (a.exports?.length || 0) + (a.functions?.length || 0);
@@ -257,7 +240,6 @@ function buildGraphifyBlock(repoPath) {
     block += `\n`;
   }
 
-  // Look for edge relationships if present
   const edges = raw.edges || raw.relationships || raw.graph?.links || raw.graph?.edges || [];
   if (Array.isArray(edges) && edges.length > 0) {
     const matchedIds = new Set(keyNodes.map(n => n.id || nodePath(n)));
@@ -278,19 +260,18 @@ function buildGraphifyBlock(repoPath) {
     }
   }
 
-  log('info', `Enriched prompt with ${keyNodes.length} Graphify AST nodes from ${usedPath}`);
-  return block;
+  const truncatedBlock = truncateGraphifyBlock(block, GRAPHIFY_BYTE_CEILING);
+  log('info', `Enriched prompt with Graphify AST nodes (${truncatedBlock.length}B, ceiling: ${GRAPHIFY_BYTE_CEILING}B)`);
+  return truncatedBlock;
 }
 
 // ==========================================
 // Source Resolution
 // ==========================================
-
-/** Resolve a repo_path (e.g. "my-repo", "owner/my-repo") to a Jules source name. */
 async function resolveSources() {
   const res = await listSources();
   const sources = res.sources || [];
-  const map = new Map(); // lowercase repo name -> { name, defaultBranch }
+  const map = new Map();
   for (const s of sources) {
     const repo = s.githubRepo?.repo || s.name.split('/').pop();
     const owner = s.githubRepo?.owner;
@@ -313,23 +294,16 @@ function incrementDaily(state) {
   state.dispatch.daily[today] = (state.dispatch.daily[today] || 0) + 1;
 }
 
-// ==========================================
-// Daily Digest
-// ==========================================
 async function generateAndSendDigest(state, sendToDiscord = false) {
   const today = chicagoToday();
   const count = state.dispatch.daily[today] || 0;
   const remainingSafety = Math.max(0, DAILY_SAFETY_LIMIT - count);
-  const remainingHard = Math.max(0, DAILY_HARD_LIMIT - count);
 
   const todayEntries = (state.dispatch.history || []).filter(h =>
     h.day === today || (!h.day && typeof h.dispatchedAt === 'string' && h.dispatchedAt.startsWith(today))
   );
 
-  // PRs awaiting audit/approval
   const pendingPrs = getPendingPrs(state, PR_STATUS_AWAITING);
-
-  // Completed jobs tracked in state
   const completedSessions = Object.entries(state.sessions || {})
     .filter(([, s]) => (typeof s === 'object' ? s.state : s) === 'COMPLETED')
     .map(([id, s]) => ({ id, ...(typeof s === 'object' ? s : {}) }));
@@ -337,7 +311,7 @@ async function generateAndSendDigest(state, sendToDiscord = false) {
   let digest = `# 📊 VANTAGE Jules Dispatch Digest — ${today}\n\n`;
   digest += `**Dispatched Today:** ${count} / ${DAILY_SAFETY_LIMIT} (Hard Cap: ${DAILY_HARD_LIMIT})\n`;
   digest += `**Safety Quota Remaining:** ${remainingSafety} automated slots (${MANUAL_RESERVE_BUFFER} manual reserve)\n`;
-  digest += `**Pending PRs (Kimi k3 Audit):** ${pendingPrs.length}\n`;
+  digest += `**Pending PRs (Audit Required):** ${pendingPrs.length}\n`;
   digest += `**Completed Sessions Recorded:** ${completedSessions.length}\n\n`;
 
   if (todayEntries.length > 0) {
@@ -349,7 +323,6 @@ async function generateAndSendDigest(state, sendToDiscord = false) {
     digest += `*No automated sessions dispatched yet today.*\n`;
   }
 
-  // Archive digest to the vault for autonomous indexing
   try {
     const digestDir = join(WORKSPACE, 'vault/03-OUTPUT/Syntheses/jules-digests');
     if (!existsSync(digestDir)) {
@@ -379,9 +352,6 @@ async function generateAndSendDigest(state, sendToDiscord = false) {
   }
 }
 
-// ==========================================
-// Main Dispatch Loop
-// ==========================================
 async function main() {
   assertNoAutoMerge();
 
@@ -411,7 +381,6 @@ async function main() {
     return;
   }
 
-  // Parse all specs and sort by priority + mtime
   const specs = files.map(file => {
     const raw = readFileSync(file, 'utf8');
     const meta = parseSpecMetadata(raw);
@@ -421,7 +390,6 @@ async function main() {
     return { file, meta, body, mtime, prioWeight, filename: basename(file) };
   });
 
-  // Sort: highest priority first, then oldest mtime first within the same priority
   specs.sort((a, b) => {
     if (b.prioWeight !== a.prioWeight) return b.prioWeight - a.prioWeight;
     return a.mtime - b.mtime;
@@ -450,7 +418,6 @@ async function main() {
 
     const { repo_path, title, priority, branch, depends_on_list } = spec.meta;
 
-    // Dependency check: skip if upstream prerequisite spec is not COMPLETED
     if (depends_on_list && depends_on_list.length > 0) {
       const unsatisfied = depends_on_list.filter(dep => !isDependencySatisfied(dep, state));
       if (unsatisfied.length > 0) {
@@ -465,7 +432,6 @@ async function main() {
       continue;
     }
 
-    // Build enriched prompt with Graphify AST subgraph
     const graphifyContext = buildGraphifyBlock(repo_path);
     const enrichedPrompt = spec.body + graphifyContext;
 
@@ -475,9 +441,7 @@ async function main() {
     log('info', `🚀 Dispatching '${spec.filename}' [${priority}] to ${sourceObj.name} (branch: ${startingBranch})...`);
 
     if (DRY_RUN) {
-      log('info', `[DRY-RUN] Would create session for ${sourceObj.name}:`);
-      log('info', `[DRY-RUN] Title: "${specTitle}"`);
-      log('info', `[DRY-RUN] Prompt Length: ${enrichedPrompt.length} chars (AST block: ${graphifyContext.length} chars)`);
+      log('info', `[DRY-RUN] Would create session for ${sourceObj.name}: "${specTitle}" (Prompt: ${enrichedPrompt.length} chars)`);
       dispatched++;
       continue;
     }
@@ -494,44 +458,43 @@ async function main() {
       const sessionId = session.name ? session.name.split('/').pop() : (session.id || 'unknown');
       log('info', `✅ Jules Session Created! ID: ${sessionId}`);
 
-      // Record session in state
-      incrementDaily(state);
-      const nowIso = new Date().toISOString();
-      state.sessions[sessionId] = {
-        state: 'IN_PROGRESS',
-        repo: repo_path,
-        source: sourceObj.name,
-        branch: startingBranch,
-        title: specTitle,
-        file: spec.filename,
-        spec: spec.filename,
-        dispatchedAt: nowIso,
-        orchestrated: false
-      };
+      await withStateLock(async () => {
+        incrementDaily(state);
+        const nowIso = new Date().toISOString();
+        state.sessions[sessionId] = {
+          state: 'IN_PROGRESS',
+          repo: repo_path,
+          source: sourceObj.name,
+          branch: startingBranch,
+          title: specTitle,
+          file: spec.filename,
+          spec: spec.filename,
+          dispatchedAt: nowIso,
+          orchestrated: false
+        };
 
-      state.dispatch.history.push({
-        day: chicagoToday(),
-        sessionId,
-        repo: repo_path,
-        file: spec.filename,
-        title: specTitle,
-        priority,
-        dispatchedAt: nowIso
+        state.dispatch.history.push({
+          day: chicagoToday(),
+          sessionId,
+          repo: repo_path,
+          file: spec.filename,
+          title: specTitle,
+          priority,
+          dispatchedAt: nowIso
+        });
+
+        saveState(state);
       });
 
-      saveState(state);
-
-      // Move spec to processed
       const destPath = join(PROCESSED_DIR, `${spec.filename.replace(/\.md$/, '')}-${Date.now()}.md`);
       renameSync(spec.file, destPath);
       log('info', `Archived processed spec to ${destPath}`);
 
-      // Rich Discord alert
       const remaining = DAILY_SAFETY_LIMIT - dailyCount(state);
       let alertMsg = `🚀 **[Jules Task Spec Dispatched]**\n`;
       alertMsg += `> **Task:** *${specTitle}*\n`;
       alertMsg += `> **Repo:** \`${repo_path}\` (branch: \`${startingBranch}\`)\n`;
-      alertMsg += `> **Priority:** \`${priority}\` | **AST Enriched:** \`${graphifyContext.length > 0 ? 'Yes' : 'No'}\`\n`;
+      alertMsg += `> **Priority:** \`${priority}\` | **AST Context:** \`${graphifyContext.length > 0 ? `${graphifyContext.length}B` : 'None'}\`\n`;
       alertMsg += `> **Session ID:** \`${sessionId}\`\n`;
       alertMsg += `> **Daily Budget:** \`${dailyCount(state)} / ${DAILY_SAFETY_LIMIT}\` (${remaining} remaining today)`;
       await sendDiscordAlert(alertMsg);

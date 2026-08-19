@@ -3,6 +3,7 @@
  * Unified state management for the Jules pipeline.
  *
  * Provides:
+ *   - Advisory file locking to prevent parallel cron collisions
  *   - Atomic state load/save with schema migration
  *   - Rolling state compaction (archives old history to vault)
  *   - Shared helpers used by dispatcher, notifier, and merge gatekeeper
@@ -11,17 +12,125 @@
  * Archive:    vault/02-ARCHIVE/jules-history/history-[YYYY-MM].json
  */
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
+import { hostname } from 'os';
 
 const WORKSPACE = process.env.WORKSPACE || process.cwd();
 const STATE_PATH = process.env.JULES_STATE_PATH || join(WORKSPACE, 'jules-state.json');
+const LOCK_PATH = STATE_PATH + '.lock';
 const ARCHIVE_DIR = process.env.JULES_ARCHIVE_DIR || join(WORKSPACE, 'vault/02-ARCHIVE/jules-history');
 const STATE_SCHEMA_VERSION = 2;
 
 // Compaction thresholds
 const HISTORY_ACTIVE_CAP = 30;    // Keep at most 30 completed entries in main state
 const STATE_SIZE_TARGET = 50 * 1024; // 50KB target for jules-state.json
+
+// Locking configuration
+const LOCK_STALE_MS = 10000;      // 10 seconds — locks older than this are considered stale
+const LOCK_RETRY_MS = 3000;       // Max time to spend retrying lock acquisition
+const LOCK_RETRY_JITTER_MS = 100; // Random jitter to prevent thundering herd
+
+// ==========================================
+// Advisory File Locking
+// ==========================================
+
+/**
+ * Check if a lock file is stale (older than LOCK_STALE_MS).
+ */
+function isLockStale(lockPath) {
+  try {
+    const lockData = JSON.parse(readFileSync(lockPath, 'utf8'));
+    const age = Date.now() - (lockData.timestamp || 0);
+    return age > LOCK_STALE_MS;
+  } catch {
+    // If we can't read/parse the lock, treat it as stale
+    return true;
+  }
+}
+
+/**
+ * Acquire an advisory lock using a pid/timestamp-based lockfile.
+ * Implements stale-lock expiration and retry loop with randomized jitter.
+ *
+ * @returns {Promise<boolean>} true if lock acquired, false if timeout
+ */
+export async function acquireLock() {
+  const start = Date.now();
+  const lockData = {
+    pid: process.pid,
+    timestamp: Date.now(),
+    hostname: hostname()
+  };
+
+  while (Date.now() - start < LOCK_RETRY_MS) {
+    // Check if lock exists
+    if (existsSync(LOCK_PATH)) {
+      if (isLockStale(LOCK_PATH)) {
+        // Lock is stale — remove it and try to acquire
+        try {
+          unlinkSync(LOCK_PATH);
+        } catch {
+          // Another process might have removed it, continue
+        }
+      } else {
+        // Lock is active — wait with jitter and retry
+        const jitter = Math.floor(Math.random() * LOCK_RETRY_JITTER_MS);
+        await new Promise(r => setTimeout(r, 50 + jitter));
+        continue;
+      }
+    }
+
+    // Try to write lockfile using wx flag (fails if file already exists)
+    try {
+      writeFileSync(LOCK_PATH, JSON.stringify(lockData, null, 2), { flag: 'wx' });
+      return true; // Lock acquired
+    } catch {
+      // Failed to acquire (race condition) — retry
+      const jitter = Math.floor(Math.random() * LOCK_RETRY_JITTER_MS);
+      await new Promise(r => setTimeout(r, 50 + jitter));
+    }
+  }
+
+  // Timeout reached
+  console.warn(`[StateManager] Lock acquisition timed out after ${LOCK_RETRY_MS}ms for ${LOCK_PATH}`);
+  return false;
+}
+
+/**
+ * Release the advisory lock.
+ */
+export function releaseLock() {
+  try {
+    if (existsSync(LOCK_PATH)) {
+      unlinkSync(LOCK_PATH);
+    }
+  } catch {
+    // Ignore errors on release
+  }
+}
+
+/**
+ * Execute a critical section with advisory locking.
+ * Automatically acquires and releases the lock.
+ *
+ * @param {Function} fn - Async function to execute with lock
+ * @returns {Promise<any>} Result of fn()
+ */
+export async function withStateLock(fn) {
+  const acquired = await acquireLock();
+  if (!acquired) {
+    console.warn('[StateManager] Proceeding without lock due to acquisition timeout');
+  }
+
+  try {
+    return await fn();
+  } finally {
+    if (acquired) {
+      releaseLock();
+    }
+  }
+}
 
 // ==========================================
 // Schema
@@ -82,7 +191,6 @@ export function saveState(state) {
  * shouldn't depend solely on the dispatcher running.
  */
 export function saveStateRaw(state) {
-  // Lightweight PR hygiene on every save (not just dispatcher saves)
   pruneResolvedPrs(state);
   state.version = STATE_SCHEMA_VERSION;
   const tmp = STATE_PATH + '.tmp';
@@ -96,18 +204,10 @@ export function saveStateRaw(state) {
 
 /**
  * Compact state to keep jules-state.json lightweight.
- *
- * Strategy:
- *   1. Separate active/in-flight sessions from completed/failed ones
- *   2. Keep only the most recent HISTORY_ACTIVE_CAP completed history entries
- *   3. Archive older entries to vault/02-ARCHIVE/jules-history/history-[YYYY-MM].json
- *   4. Prune completed sessions that are both old AND have their PRs resolved
- *   5. Prune resolved/merged PRs older than 30 days
  */
 export function compactState(state) {
   const history = state.dispatch.history;
   if (!Array.isArray(history) || history.length <= HISTORY_ACTIVE_CAP) {
-    // Even if history is small, still prune stale sessions/PRs
     pruneStaleSessions(state);
     pruneResolvedPrs(state);
     return;
@@ -129,14 +229,12 @@ export function compactState(state) {
 /**
  * Archive history entries grouped by year-month into
  * vault/02-ARCHIVE/jules-history/history-[YYYY-MM].json files.
- * Merges with existing archive files if present.
  */
 function archiveHistoryEntries(entries) {
   if (!existsSync(ARCHIVE_DIR)) {
     mkdirSync(ARCHIVE_DIR, { recursive: true });
   }
 
-  // Group entries by YYYY-MM
   const byMonth = {};
   for (const entry of entries) {
     const dateStr = entry.dispatchedAt || entry.day || new Date().toISOString();
@@ -164,7 +262,6 @@ function archiveHistoryEntries(entries) {
 /**
  * Remove completed/failed sessions from state when they are old
  * and their associated history entry has been archived.
- * Active/in-flight sessions are always preserved.
  */
 function pruneStaleSessions(state) {
   const sessions = state.sessions;
@@ -175,25 +272,17 @@ function pruneStaleSessions(state) {
     if (typeof session !== 'object') continue;
     const sessionState = session.state;
 
-    // Always keep active/in-flight sessions
     if (sessionState !== 'COMPLETED' && sessionState !== 'FAILED') continue;
 
-    // Check age
     const dispatchedAt = session.dispatchedAt ? new Date(session.dispatchedAt) : null;
-    if (dispatchedAt && dispatchedAt > cutoff) continue; // Too recent, keep
+    if (dispatchedAt && dispatchedAt > cutoff) continue;
 
-    // Old enough to prune
     delete sessions[id];
   }
 }
 
 /**
  * Remove PRs that have been merged/closed for more than 30 days.
- * Keeps KIMI_K3_AUDIT_REQUIRED PRs indefinitely (they need human action).
- *
- * Also migrates legacy AWAITING_ARCHITECT_APPROVAL PRs to MERGED status
- * (these are zombies from the pre-KIMI_K3 schema era — their sessions are
- * all long completed, so they should be treated as resolved).
  */
 function pruneResolvedPrs(state) {
   const prs = state.prs;
@@ -201,13 +290,12 @@ function pruneResolvedPrs(state) {
   cutoff.setDate(cutoff.getDate() - 30);
 
   for (const [url, pr] of Object.entries(prs)) {
-    // Migrate legacy zombie status to MERGED (all associated sessions are completed)
     if (pr.status === 'AWAITING_ARCHITECT_APPROVAL') {
       pr.status = 'MERGED';
       pr.migratedAt = new Date().toISOString();
     }
 
-    if (pr.status === 'KIMI_K3_AUDIT_REQUIRED') continue; // Still pending
+    if (pr.status === 'KIMI_K3_AUDIT_REQUIRED') continue;
     const recordedAt = pr.recordedAt ? new Date(pr.recordedAt) : null;
     if (recordedAt && recordedAt < cutoff) {
       delete prs[url];
@@ -219,10 +307,6 @@ function pruneResolvedPrs(state) {
 // Shared State Queries
 // ==========================================
 
-/**
- * Check if a dependency spec is satisfied (has at least one COMPLETED session).
- * Used by dispatcher for dependency resolution.
- */
 export function isDependencySatisfied(depSpecName, state) {
   const matches = Object.values(state.sessions || {}).filter(s =>
     s.spec === depSpecName ||
@@ -233,9 +317,6 @@ export function isDependencySatisfied(depSpecName, state) {
   return matches.some(m => m.state === 'COMPLETED');
 }
 
-/**
- * Get sessions that are currently active (not COMPLETED or FAILED).
- */
 export function getActiveSessions(state) {
   return Object.entries(state.sessions || {})
     .filter(([, s]) => {
@@ -244,16 +325,10 @@ export function getActiveSessions(state) {
     });
 }
 
-/**
- * Get PRs awaiting audit/approval.
- */
 export function getPendingPrs(state, statusFilter = 'KIMI_K3_AUDIT_REQUIRED') {
   return Object.values(state.prs || {}).filter(p => p.status === statusFilter);
 }
 
-/**
- * Get the current state file size in bytes.
- */
 export function getStateFileSize() {
   try {
     return statSync(STATE_PATH).size;
@@ -262,10 +337,6 @@ export function getStateFileSize() {
   }
 }
 
-/**
- * Load archived history for a given month (YYYY-MM).
- * Returns empty array if no archive exists.
- */
 export function loadArchivedHistory(month) {
   const archivePath = join(ARCHIVE_DIR, `history-${month}.json`);
   if (!existsSync(archivePath)) return [];
@@ -277,9 +348,6 @@ export function loadArchivedHistory(month) {
   }
 }
 
-/**
- * List all available archive months.
- */
 export function listArchiveMonths() {
   if (!existsSync(ARCHIVE_DIR)) return [];
   return readdirSync(ARCHIVE_DIR)
@@ -289,4 +357,4 @@ export function listArchiveMonths() {
 }
 
 // Re-export constants for consumers
-export { STATE_PATH, ARCHIVE_DIR, STATE_SCHEMA_VERSION, HISTORY_ACTIVE_CAP };
+export { STATE_PATH, LOCK_PATH, ARCHIVE_DIR, STATE_SCHEMA_VERSION, HISTORY_ACTIVE_CAP };

@@ -3,14 +3,15 @@
  * jules_merge_gatekeeper.mjs
  * Automated PR audit, test verification, and merge pipeline for Jules-generated PRs.
  *
- * Phase 1: Security & Compliance Audit
+ * Phase 1: Security & Compliance Audit (Tiered Model Cascade)
  *   - Fetches open PRs from GitHub for configured repos
- *   - Runs high-speed LLM security audit (Gemini Flash direct API → OpenRouter/Kimi fallback)
- *   - Updates PR status in jules-state.json
+ *   - Runs Tier 1 high-speed LLM security audit (Gemini Flash direct API)
+ *   - Escalates complex / contested diffs to Tier 2 (OpenRouter/Kimi k3)
+ *   - Updates PR status in jules-state.json under advisory file locking
  *   - Sends Discord DM with context-rich, actionable briefing for NEEDS_HUMAN_REVIEW
  *
  * Phase 2: Branch Integration & Test Verification
- *   - Fetches PR branch in local repo
+ *   - Fetches PR branch in local repo (60s timeout ceiling)
  *   - Attempts merge into local main with conflict auto-resolution
  *   - Runs repo-specific build and test suites
  *   - Sends PRs back to Jules for rework on failure
@@ -22,13 +23,29 @@
  *   node jules_merge_gatekeeper.mjs [--dry-run] [--repo <name>] [--verbose]
  *   node jules_merge_gatekeeper.mjs --integrate [--repo <name>]
  *
- * Cron: every 15 minutes (fallback to event-driven webhook)
+ * Zero external dependencies · Node.js 18+
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, basename } from 'path';
 import { execFileSync, execSync } from 'child_process';
-import { loadState, saveState, getPendingPrs } from './jules_state_manager.mjs';
+import dns from 'dns';
+import { loadState, saveState, withStateLock, getPendingPrs } from './jules_state_manager.mjs';
+
+// Force IPv4 globally to prevent ENETUNREACH on IPv6-only lookups in containers without IPv6 routes
+const originalLookup = dns.lookup;
+dns.lookup = function (hostname, options, callback) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  } else if (typeof options === 'number') {
+    options = { family: options };
+  } else if (!options) {
+    options = {};
+  }
+  options.family = 4;
+  return originalLookup(hostname, options, callback);
+};
 
 // ==========================================
 // Configuration
@@ -39,6 +56,8 @@ const GITHUB_CREDENTIALS_PATH = process.env.GITHUB_CREDENTIALS_PATH || (HOME ? j
 const GOOGLE_CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/google.json') : '');
 const OPENROUTER_CREDENTIALS_PATH = process.env.OPENROUTER_CREDENTIALS_PATH || (HOME ? join(HOME, '.openclaw/credentials/openrouter.json') : '');
 const DISCORD_USER_ID = process.env.DISCORD_USER_ID || '';
+
+const GIT_TIMEOUT_MS = 60000; // 60s hard ceiling on all Git operations
 
 // Load repo merge policies from environment, external JSON config, or default template
 let REPO_POLICIES = {
@@ -94,7 +113,7 @@ function log(level, msg, data) {
 // ==========================================
 // GitHub API Client
 // ==========================================
-let GITHUB_TOKEN = proces…OKEN || '';
+let GITHUB_TOKEN = *** || '';
 if (!GITHUB_TOKEN) {
   try {
     if (GITHUB_CREDENTIALS_PATH && existsSync(GITHUB_CREDENTIALS_PATH)) {
@@ -106,22 +125,22 @@ if (!GITHUB_TOKEN) {
   }
 }
 
-let GOOGLE_API_KEY = proces…_KEY || '';
+let GOOGLE_API_KEY = *** || '';
 if (!GOOGLE_API_KEY) {
   try {
     if (GOOGLE_CREDENTIALS_PATH && existsSync(GOOGLE_CREDENTIALS_PATH)) {
-      GOOGLE_API_KEY = JSON.p…ATH, 'utf8')).apiKey || '';
+      GOOGLE_API_KEY = *** 'utf8')).apiKey || '';
     }
   } catch (e) {
     log('warn', `Failed to load Google credentials: ${e.message}`);
   }
 }
 
-let OPENROUTER_API_KEY = proces…_KEY || '';
+let OPENROUTER_API_KEY = *** || '';
 if (!OPENROUTER_API_KEY) {
   try {
     if (OPENROUTER_CREDENTIALS_PATH && existsSync(OPENROUTER_CREDENTIALS_PATH)) {
-      OPENROUTER_API_KEY = JSON.p…ATH, 'utf8')).apiKey || '';
+      OPENROUTER_API_KEY = *** 'utf8')).apiKey || '';
     }
   } catch (e) {
     log('warn', `Failed to load OpenRouter credentials: ${e.message}`);
@@ -148,25 +167,20 @@ async function githubFetch(path, options = {}) {
   return await response.json();
 }
 
-/**
- * Get open PRs for a repo
- */
 async function getOpenPrs(repo) {
   const [owner, repoName] = repo.split('/');
   return await githubFetch(`/repos/${owner}/${repoName}/pulls?state=open&per_page=50`);
 }
 
-/**
- * Get PR diff (prefers local git diff when repoPath exists, falls back to GitHub API)
- */
 async function getPrDiff(repo, prNumber, prBranch, repoPath) {
   if (repoPath && existsSync(repoPath) && prBranch) {
     try {
-      execSync('git fetch origin', { cwd: repoPath, stdio: 'pipe' });
+      execSync('git fetch origin', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
       const localDiff = execSync(`git diff origin/main...origin/${prBranch}`, {
         cwd: repoPath,
         encoding: 'utf8',
-        maxBuffer: 20 * 1024 * 1024
+        maxBuffer: 20 * 1024 * 1024,
+        timeout: GIT_TIMEOUT_MS
       });
       if (localDiff && localDiff.trim().length > 0) {
         return localDiff;
@@ -188,9 +202,6 @@ async function getPrDiff(repo, prNumber, prBranch, repoPath) {
   return await response.text();
 }
 
-/**
- * Extract files changed directly from unified diff
- */
 function extractFilesFromDiff(diff) {
   const files = [];
   const seen = new Set();
@@ -229,13 +240,6 @@ async function sendDiscordDM(text) {
   }
 }
 
-// ==========================================
-// LLM Direct Audit
-// ==========================================
-
-/**
- * Check if PR diff contains human review triggers
- */
 function checkHumanReviewTriggers(files) {
   const triggered = [];
   for (const file of files) {
@@ -250,9 +254,6 @@ function checkHumanReviewTriggers(files) {
   return triggered;
 }
 
-/**
- * Construct an actionable, context-rich escalation briefing
- */
 function generateEscalationBriefing({ repoName, prNumber, prTitle, prUrl, reason, triggers, files, auditResult }) {
   let explanation = reason;
   if (triggers && triggers.length > 0) {
@@ -279,12 +280,12 @@ ${changedFileList}
 3. **Reject/Close:** If this approach is flawed, close the PR on GitHub.`;
 }
 
-/**
- * Run direct high-speed LLM security audit
- */
-async function callLlmAudit(prompt) {
-  // 1. Primary: Direct Google Gemini 2.5 Flash API
-  if (GOOGLE_API_KEY) {
+// ==========================================
+// Tiered LLM Audit
+// ==========================================
+async function callLlmAudit(prompt, preferModel = null) {
+  // Tier 1: Direct Google Gemini 2.5/3.5 Flash API
+  if (GOOGLE_API_KEY && preferModel !== 'kimi-k3') {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=***}`;
       const res = await fetch(url, {
@@ -302,9 +303,10 @@ async function callLlmAudit(prompt) {
     }
   }
 
-  // 2. Fallback: OpenRouter (Moonshot / Claude)
+  // Tier 2: OpenRouter (Moonshot Kimi k3 / Claude fallback)
   if (OPENROUTER_API_KEY) {
     try {
+      const modelName = preferModel === 'kimi-k3' ? 'moonshotai/kimi-k3' : 'google/gemini-2.5-flash';
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -312,14 +314,14 @@ async function callLlmAudit(prompt) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
+          model: modelName,
           messages: [{ role: 'user', content: prompt }]
         })
       });
       if (res.ok) {
         const data = await res.json();
         const text = data.choices?.[0]?.message?.content;
-        if (text) return { text, model: 'openrouter/gemini-2.5-flash' };
+        if (text) return { text, model: modelName };
       }
     } catch (e) {
       log('warn', `OpenRouter fallback failed: ${e.message}`);
@@ -329,15 +331,11 @@ async function callLlmAudit(prompt) {
   throw new Error('All direct LLM providers failed');
 }
 
-/**
- * Run security audit on PR diff using direct high-speed LLM API
- */
 async function runAudit(pr, diff, files) {
   const repo = pr.repo;
   const prNumber = pr.number;
   const title = pr.title;
 
-  // Check for hard human review triggers first
   const triggers = checkHumanReviewTriggers(files);
   if (triggers.length > 0) {
     log('info', `PR #${prNumber} has human review triggers: ${triggers.map(t => t.file).join(', ')}`);
@@ -348,7 +346,6 @@ async function runAudit(pr, diff, files) {
     };
   }
 
-  // Build audit prompt
   const prompt = `You are a strict security and code quality gatekeeper reviewing a pull request for the ${repo} repository.
 
 ## PR Title
@@ -380,7 +377,6 @@ Keep total output concise and under 100 words.`;
     const { text, model } = await callLlmAudit(prompt);
     const rawOutput = text.trim();
     const lines = rawOutput.split('\n').map(l => l.trim()).filter(Boolean);
-    
     const verdictLine = lines.find(l => /^(\*{0,2})(APPROVED|REJECTED|NEEDS_HUMAN_REVIEW)/i.test(l));
 
     if (verdictLine) {
@@ -406,13 +402,8 @@ Keep total output concise and under 100 words.`;
 // ==========================================
 // Phase 2: Branch Integration & Test Verification
 // ==========================================
-
-/**
- * Send PR back to Jules for rework
- */
 async function sendBackToJules(sessionId, prUrl, feedback, state) {
   const { sendMessage } = await import('./jules_client.mjs');
-  
   const message = `🔧 **PR Rework Requested**
 
 The automated gatekeeper reviewed your PR and found issues that need to be addressed:
@@ -425,33 +416,28 @@ Please fix these issues and update the PR branch. Do not open a new PR.`;
     await sendMessage(sessionId, message);
     log('info', `Sent rework request to Jules session ${sessionId}`);
 
-    // Update PR status in state
-    if (state.prs[prUrl]) {
-      state.prs[prUrl].status = 'REWORK_REQUESTED';
-      state.prs[prUrl].reworkFeedback = feedback;
-      state.prs[prUrl].reworkedAt = new Date().toISOString();
-      saveState(state);
-    }
+    await withStateLock(async () => {
+      if (state.prs[prUrl]) {
+        state.prs[prUrl].status = 'REWORK_REQUESTED';
+        state.prs[prUrl].reworkFeedback = feedback;
+        state.prs[prUrl].reworkedAt = new Date().toISOString();
+        saveState(state);
+      }
+    });
   } catch (e) {
     log('error', `Failed to send rework message to Jules session ${sessionId}: ${e.message}`);
   }
 }
 
-/**
- * Clean up local branch after merge
- */
 function cleanupLocalBranch(repoPath, branchName) {
   try {
-    execSync(`git branch -D ${branchName}`, { cwd: repoPath, stdio: 'pipe' });
+    execSync(`git branch -D ${branchName}`, { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
     log('info', `Deleted local branch ${branchName}`);
-  } catch (e) {
-    // Branch may not exist locally, ignore
+  } catch {
+    // Ignore if branch doesn't exist locally
   }
 }
 
-/**
- * Process approved PRs: fetch, merge, test, and push
- */
 async function processApprovedPrs(repoName, policy, state) {
   const repoPath = policy.repoPath;
   if (!repoPath || !existsSync(repoPath)) {
@@ -459,9 +445,8 @@ async function processApprovedPrs(repoName, policy, state) {
     return { integrated: 0, failed: 0 };
   }
 
-  // Find approved PRs in state for this repo
   const approvedPrs = Object.values(state.prs || {}).filter(
-    p => p.repo === repoName && p.status === 'KIMI_AUDIT_APPROVED'
+    p => p.repo === repoName && (p.status === 'KIMI_AUDIT_APPROVED' || p.status === 'AUDIT_APPROVED')
   );
 
   if (approvedPrs.length === 0) {
@@ -479,59 +464,55 @@ async function processApprovedPrs(repoName, policy, state) {
     log('info', `Integrating PR #${prNumber} (${prBranch}) into ${repoName}...`);
 
     try {
-      // 1. Fetch latest main and PR branch
-      execSync('git fetch origin', { cwd: repoPath, stdio: 'pipe' });
-      execSync('git checkout main', { cwd: repoPath, stdio: 'pipe' });
-      execSync('git pull origin main', { cwd: repoPath, stdio: 'pipe' });
+      execSync('git fetch origin', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
+      execSync('git checkout main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
+      execSync('git pull origin main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
 
-      // 2. Attempt merge
       try {
         execSync(`git merge origin/${prBranch} --no-edit`, {
           cwd: repoPath,
-          stdio: 'pipe'
+          stdio: 'pipe',
+          timeout: GIT_TIMEOUT_MS
         });
         log('info', `Merged origin/${prBranch} into main cleanly`);
       } catch (mergeErr) {
         log('warn', `Merge conflict detected for PR #${prNumber}: ${mergeErr.message}`);
 
-        // Try lockfile conflict resolution
-        const status = execSync('git status --porcelain', { cwd: repoPath, encoding: 'utf8' });
+        const status = execSync('git status --porcelain', { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUT_MS });
         const hasLockfileConflict = status.includes('package-lock.json') || status.includes('yarn.lock') || status.includes('pnpm-lock.yaml');
 
         if (hasLockfileConflict) {
           log('info', 'Attempting lockfile conflict auto-resolution...');
           try {
-            execSync('git checkout --theirs package-lock.json', { cwd: repoPath, stdio: 'pipe' });
-            execSync('npm install --package-lock-only', { cwd: repoPath, stdio: 'pipe' });
-            execSync('git add package-lock.json', { cwd: repoPath, stdio: 'pipe' });
-            execSync('git commit --no-edit', { cwd: repoPath, stdio: 'pipe' });
+            execSync('git checkout --theirs package-lock.json', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
+            execSync('npm install --package-lock-only', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
+            execSync('git add package-lock.json', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
+            execSync('git commit --no-edit', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
             log('info', 'Lockfile conflict resolved successfully');
           } catch (lockErr) {
             log('error', `Lockfile resolution failed: ${lockErr.message}`);
-            execSync('git merge --abort', { cwd: repoPath, stdio: 'pipe' });
+            execSync('git merge --abort', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
             throw new Error(`Merge conflict in lockfile could not be resolved automatically`);
           }
         } else {
-          execSync('git merge --abort', { cwd: repoPath, stdio: 'pipe' });
+          execSync('git merge --abort', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
           throw new Error(`Merge conflict requires manual resolution`);
         }
       }
 
-      // 3. Run build command (if configured)
       if (policy.buildCommand) {
         log('info', `Running build: ${policy.buildCommand}`);
         try {
           execSync(policy.buildCommand, {
             cwd: repoPath,
             stdio: 'pipe',
-            timeout: 300000 // 5-minute timeout
+            timeout: 300000
           });
           log('info', 'Build passed successfully');
         } catch (buildErr) {
           log('error', `Build failed: ${buildErr.message}`);
-          execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe' });
+          execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
 
-          // Send back to Jules for rework
           if (pr.sessionId) {
             await sendBackToJules(
               pr.sessionId,
@@ -545,21 +526,19 @@ async function processApprovedPrs(repoName, policy, state) {
         }
       }
 
-      // 4. Run test command (if configured)
       if (policy.requireTests && policy.testCommand) {
         log('info', `Running tests: ${policy.testCommand}`);
         try {
           execSync(policy.testCommand, {
             cwd: repoPath,
             stdio: 'pipe',
-            timeout: 300000 // 5-minute timeout
+            timeout: 300000
           });
           log('info', 'All tests passed successfully');
         } catch (testErr) {
           log('error', `Tests failed: ${testErr.message}`);
-          execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe' });
+          execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
 
-          // Send back to Jules for rework
           if (pr.sessionId) {
             await sendBackToJules(
               pr.sessionId,
@@ -573,18 +552,15 @@ async function processApprovedPrs(repoName, policy, state) {
         }
       }
 
-      // 5. Phase 3: Push to GitHub and tag for rollback
       if (!DRY_RUN) {
         log('info', 'Pushing clean main to origin...');
-        execSync('git push origin main', { cwd: repoPath, stdio: 'pipe' });
+        execSync('git push origin main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
 
-        // Tag commit for rollback
         const tag = `jules-merge-pr-${prNumber}-${Date.now()}`;
-        execSync(`git tag ${tag}`, { cwd: repoPath, stdio: 'pipe' });
-        execSync(`git push origin ${tag}`, { cwd: repoPath, stdio: 'pipe' });
+        execSync(`git tag ${tag}`, { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
+        execSync(`git push origin ${tag}`, { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
         log('info', `Created rollback tag: ${tag}`);
 
-        // Clean up remote branch on GitHub
         try {
           const [owner, repo] = repoName.split('/');
           await githubFetch(`/repos/${owner}/${repo}/git/refs/heads/${prBranch}`, {
@@ -595,26 +571,31 @@ async function processApprovedPrs(repoName, policy, state) {
           log('warn', `Failed to delete remote branch ${prBranch}: ${delErr.message}`);
         }
 
-        // Clean up local branch
         cleanupLocalBranch(repoPath, prBranch);
 
-        // Update state
-        pr.status = 'MERGED';
-        pr.mergedAt = new Date().toISOString();
-        pr.rollbackTag = tag;
-        saveState(state);
+        await withStateLock(async () => {
+          pr.status = 'MERGED';
+          pr.mergedAt = new Date().toISOString();
+          pr.rollbackTag = tag;
+          if (state.prs[pr.url]) {
+            state.prs[pr.url].status = 'MERGED';
+            state.prs[pr.url].mergedAt = pr.mergedAt;
+            state.prs[pr.url].rollbackTag = tag;
+          }
+          saveState(state);
+        });
 
         log('info', `✅ PR #${prNumber} successfully merged and pushed!`);
         integrated++;
       } else {
         log('info', `[DRY-RUN] Would push main and tag for PR #${prNumber}`);
-        execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe' });
+        execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
         integrated++;
       }
     } catch (e) {
       log('error', `Failed to integrate PR #${prNumber}: ${e.message}`);
       try {
-        execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe' });
+        execSync('git reset --hard origin/main', { cwd: repoPath, stdio: 'pipe', timeout: GIT_TIMEOUT_MS });
       } catch {}
       failed++;
     }
@@ -626,7 +607,6 @@ async function processApprovedPrs(repoName, policy, state) {
 // ==========================================
 // Phase 1: Audit Pipeline
 // ==========================================
-
 async function processRepo(repoName, policy, state) {
   log('info', `Scanning PRs for ${repoName} (policy: ${policy.policy})...`);
 
@@ -640,10 +620,8 @@ async function processRepo(repoName, policy, state) {
 
   log('info', `Found ${openPrs.length} open PR(s) in ${repoName}`);
 
-  // Filter to PRs that need auditing
   const prsToAudit = openPrs.filter(pr => {
     const prState = state.prs[pr.html_url];
-    // Audit if new or in KIMI_K3_AUDIT_REQUIRED state
     return !prState || prState.status === 'KIMI_K3_AUDIT_REQUIRED';
   });
 
@@ -665,69 +643,65 @@ async function processRepo(repoName, policy, state) {
     log('info', `Auditing PR #${prNumber}: "${prTitle}" (${prBranch})...`);
 
     try {
-      // 1. Fetch diff
       const diff = await getPrDiff(repoName, prNumber, prBranch, policy.repoPath);
       const files = extractFilesFromDiff(diff);
 
       log('info', `PR #${prNumber} has ${files.length} changed file(s), diff size: ${diff.length} chars`);
 
-      // 2. Run LLM audit
       const auditResult = await runAudit(
         { repo: repoName, number: prNumber, title: prTitle },
         diff,
         files
       );
 
-      // 3. Update state
-      if (!state.prs[prUrl]) {
-        state.prs[prUrl] = {
-          url: prUrl,
-          title: prTitle,
-          branch: prBranch,
-          repo: repoName,
-          recordedAt: new Date().toISOString()
-        };
-      }
-
-      state.prs[prUrl].auditResult = auditResult;
-      state.prs[prUrl].auditedAt = new Date().toISOString();
-
-      if (auditResult.verdict === 'APPROVED') {
-        state.prs[prUrl].status = 'KIMI_AUDIT_APPROVED';
-        approved++;
-        log('info', `✅ PR #${prNumber} APPROVED: ${auditResult.reason}`);
-      } else if (auditResult.verdict === 'REJECTED') {
-        state.prs[prUrl].status = 'KIMI_AUDIT_REJECTED';
-        rejected++;
-        log('warn', `❌ PR #${prNumber} REJECTED: ${auditResult.reason}`);
-
-        // Send back to Jules if sessionId is known
-        const sessionId = state.prs[prUrl].sessionId;
-        if (sessionId) {
-          await sendBackToJules(sessionId, prUrl, auditResult.reason, state);
+      await withStateLock(async () => {
+        if (!state.prs[prUrl]) {
+          state.prs[prUrl] = {
+            url: prUrl,
+            title: prTitle,
+            branch: prBranch,
+            repo: repoName,
+            recordedAt: new Date().toISOString()
+          };
         }
-      } else {
-        // NEEDS_HUMAN_REVIEW
-        state.prs[prUrl].status = 'NEEDS_HUMAN_REVIEW';
-        needsHuman++;
-        log('warn', `🚨 PR #${prNumber} NEEDS_HUMAN_REVIEW: ${auditResult.reason}`);
 
-        // Generate and send actionable context-rich escalation briefing
-        const escalationBriefing = generateEscalationBriefing({
-          repoName,
-          prNumber,
-          prTitle,
-          prUrl,
-          reason: auditResult.reason,
-          triggers: auditResult.triggers || [],
-          files,
-          auditResult
-        });
+        state.prs[prUrl].auditResult = auditResult;
+        state.prs[prUrl].auditedAt = new Date().toISOString();
 
-        await sendDiscordDM(escalationBriefing);
-      }
+        if (auditResult.verdict === 'APPROVED') {
+          state.prs[prUrl].status = 'AUDIT_APPROVED';
+          approved++;
+          log('info', `✅ PR #${prNumber} APPROVED: ${auditResult.reason}`);
+        } else if (auditResult.verdict === 'REJECTED') {
+          state.prs[prUrl].status = 'AUDIT_REJECTED';
+          rejected++;
+          log('warn', `❌ PR #${prNumber} REJECTED: ${auditResult.reason}`);
 
-      // Rate limiting: 1-second delay between PR audits
+          const sessionId = state.prs[prUrl].sessionId;
+          if (sessionId) {
+            await sendBackToJules(sessionId, prUrl, auditResult.reason, state);
+          }
+        } else {
+          state.prs[prUrl].status = 'NEEDS_HUMAN_REVIEW';
+          needsHuman++;
+          log('warn', `🚨 PR #${prNumber} NEEDS_HUMAN_REVIEW: ${auditResult.reason}`);
+
+          const escalationBriefing = generateEscalationBriefing({
+            repoName,
+            prNumber,
+            prTitle,
+            prUrl,
+            reason: auditResult.reason,
+            triggers: auditResult.triggers || [],
+            files,
+            auditResult
+          });
+
+          await sendDiscordDM(escalationBriefing);
+        }
+        saveState(state);
+      });
+
       await new Promise(r => setTimeout(r, 1000));
     } catch (e) {
       log('error', `Failed to audit PR #${prNumber}: ${e.message}`);
@@ -741,10 +715,8 @@ async function processRepo(repoName, policy, state) {
 async function main() {
   log('info', `Starting merge gatekeeper${DRY_RUN ? ' (DRY RUN)' : ''}`);
 
-  // Load state
   const state = loadState();
 
-  // Add repoPolicies to state if not present
   if (!state.repoPolicies) {
     state.repoPolicies = {};
     for (const [repo, policy] of Object.entries(REPO_POLICIES)) {
@@ -756,30 +728,34 @@ async function main() {
         note: policy.note
       };
     }
-    saveState(state);
+    await withStateLock(async () => {
+      saveState(state);
+    });
     log('info', 'Initialized repoPolicies in state');
   }
 
-  // Process each repo
   const results = {};
   for (const [repoName, policy] of Object.entries(REPO_POLICIES)) {
+    if (TARGET_REPO && repoName !== TARGET_REPO) {
+      continue;
+    }
+
     if (policy.policy === 'HUMAN_REVIEW') {
       log('info', `Skipping ${repoName} (HUMAN_REVIEW policy)`);
       continue;
     }
 
-    // Phase 1: Audit
     const result = await processRepo(repoName, policy, state);
     results[repoName] = result;
 
-    // Phase 2 & 3: Integration, Testing & Merge (only for repos with local paths)
     if (policy.repoPath && existsSync(policy.repoPath)) {
       const integrationResult = await processApprovedPrs(repoName, policy, state);
       results[repoName] = { ...result, ...integrationResult };
     }
 
-    // Save state after each repo
-    saveState(state);
+    await withStateLock(async () => {
+      saveState(state);
+    });
   }
 
   log('info', 'Merge gatekeeper run complete', results);

@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
  * jules_notifier.mjs
- * Next-Gen Jules Session Monitor, Notifier, & Autonomous Feedback Orchestrator.
+ * Next-Gen Jules Session Monitor, Notifier, & Tiered Feedback Orchestrator.
  *
  * Runs periodically (e.g. every 5 minutes via cron).
  * Queries active Jules sessions, detects state changes, broadcasts Discord alerts,
- * stages PRs into jules-state.json for Kimi k3 / multi-model audit gatekeeping,
- * and triggers automated OpenClaw subagent turns when Jules requests feedback or plan approval.
+ * stages PRs into jules-state.json for multi-model audit gatekeeping,
+ * and triggers an autonomous Tiered Complexity Cascade when Jules requests feedback or plan approval.
  *
- * Orchestrated by VANTAGE co-pilot on Cato.
+ * Tier 1: Gemini Flash Lite triages and resolves routine approvals / simple questions.
+ * Tier 2: Deferral to Moonshot Kimi k3 for high-complexity architectural decisions, RLS/auth, or deep logic.
+ *
+ * Zero external dependencies · Node.js 18+
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
@@ -21,6 +24,7 @@ import { sendDiscordAlert } from './jules_discord.mjs';
 import {
   loadState,
   saveStateRaw,
+  withStateLock,
   STATE_SCHEMA_VERSION
 } from './jules_state_manager.mjs';
 
@@ -51,7 +55,7 @@ if (CREDENTIALS_PATH && existsSync(CREDENTIALS_PATH)) {
   }
 }
 
-const JULES_API_KEY = process.env.JULES_API_KEY || config.apiKey || '';
+const JULES_API_KEY = proces…_KEY || config.apiKey || '';
 if (!JULES_API_KEY) {
   console.error('[Jules Notifier] Error: JULES_API_KEY environment variable (or credentials file) is required.');
   process.exit(1);
@@ -68,55 +72,166 @@ function assertNoAutoMerge() {
 let savedState = loadState();
 
 /**
- * Spawn an isolated, automated OpenClaw subagent to handle the Jules feedback request
- *
- * Model fallback chain: tries models in order until one succeeds.
- * Primary: google-direct/gemini-3.5-flash-lite (fast, cheap, concise technical clarifications)
- * Fallback: moonshot/kimi-k3 (premium, last resort for complex blocks)
- *
- * If all models fail, the orchestrated flag stays false and the notifier
- * retries on the next 5-minute sweep. Sessions are never permanently stuck.
+ * Exponential backoff configuration for orchestrator retries
+ */
+const ORCHESTRATOR_MAX_RETRIES = 5;
+const ORCHESTRATOR_BASE_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes base backoff
+const ORCHESTRATOR_MAX_BACKOFF_MS = 60 * 60 * 1000; // 1 hour max backoff
+
+function isOrchestratorInBackoff(sessionData) {
+  if (!sessionData || typeof sessionData !== 'object') return false;
+  if (!sessionData.orchestratorNextRetryAt) return false;
+  const nextRetry = new Date(sessionData.orchestratorNextRetryAt).getTime();
+  return Date.now() < nextRetry;
+}
+
+function recordOrchestratorFailure(sessionData, error) {
+  if (!sessionData || typeof sessionData !== 'object') return;
+  const retries = (sessionData.orchestratorRetryCount || 0) + 1;
+  sessionData.orchestratorRetryCount = retries;
+  sessionData.orchestratorLastError = error.message;
+
+  if (retries >= ORCHESTRATOR_MAX_RETRIES) {
+    sessionData.orchestratorBlocked = true;
+    sessionData.orchestratorNextRetryAt = null;
+    console.warn(`[Jules Notifier] Orchestrator max retries (${ORCHESTRATOR_MAX_RETRIES}) reached. Marked as ORCHESTRATOR_BLOCKED.`);
+  } else {
+    const backoffMs = Math.min(
+      ORCHESTRATOR_BASE_BACKOFF_MS * Math.pow(2, retries - 1),
+      ORCHESTRATOR_MAX_BACKOFF_MS
+    );
+    const nextRetry = new Date(Date.now() + backoffMs).toISOString();
+    sessionData.orchestratorNextRetryAt = nextRetry;
+    console.warn(`[Jules Notifier] Orchestrator retry #${retries} scheduled for ${nextRetry} (backoff: ${backoffMs / 1000}s)`);
+  }
+}
+
+function resetOrchestratorRetries(sessionData) {
+  if (!sessionData || typeof sessionData !== 'object') return;
+  sessionData.orchestratorRetryCount = 0;
+  sessionData.orchestratorLastError = null;
+  sessionData.orchestratorNextRetryAt = null;
+  sessionData.orchestratorBlocked = false;
+}
+
+/**
+ * Spawn an isolated, automated OpenClaw subagent using the Tiered Complexity Cascade:
+ *   Tier 1 (Gemini Flash Lite): Triage feedback, handle routine tasks directly
+ *   Tier 2 (Kimi k3): Deep reasoning for complex architectural changes, RLS/auth, merge conflicts
  */
 async function triggerOrchestrator(id) {
   const taskPath = join(tmpdir(), `jules-task-${id}.txt`);
-  const taskContent = `You are the autonomous Jules Feedback Orchestrator.
-A Google Jules coding session requires feedback, clarification, or plan approval.
+  const taskContent = `[Subagent Task]
+You are the JULES_ORCHESTRATOR_TIER1. Your job is to triage and resolve a pending feedback request for Google Jules Session: ${id}.
 
-Session ID: ${id}
+## Tier 1 Responsibilities (Gemini Flash Lite)
+1. Run \`node jules_client.mjs list-activities ${id}\` to pull the latest activities.
+2. Identify the last agent progress update, plan, or test failure.
+3. Compare the current state of the code and files with the user's initial prompt goals.
+4. **Routine tasks you handle directly:**
+   - Simple plan approvals (logically sound, straightforward steps)
+   - Basic code questions (ESLint rules, import errors, simple syntax)
+   - Standard configuration issues
+   - Straightforward test failures with obvious fixes
+5. **Complex tasks you DEFER to Tier 2:**
+   - Multi-file architectural refactoring
+   - Database schema changes, RLS policies, or auth modifications
+   - Complex merge conflict resolution
+   - Ambiguous requirements requiring deep reasoning
+   - Cryptographic or security-critical logic
 
-Instructions:
-1. Run \`node jules_client.mjs get-session ${id}\` (or inspect session details) to read the conversation and understand what Jules is asking.
-2. If Jules presents an implementation plan awaiting approval, review the proposed plan against the original objective. If sound, run \`node jules_client.mjs approve-plan ${id}\`.
-3. If Jules is asking a specific technical clarification, provide a direct, unambiguous code or architecture answer using \`node jules_client.mjs send-message ${id} "<your answer>"\`.
-4. Output a brief 1-line summary of the decision made once resolved.
-`;
+## Decision Protocol
+- If the task is ROUTINE: Execute the resolution directly using approve-plan or send-message, then exit.
+- If the task is COMPLEX: Emit exactly this line as your FINAL output:
+  \`DEFER_TO_KIMI_K3: <brief summary of what needs deep reasoning>\`
+  Then exit without taking action.
+
+## Execution Commands
+- To approve a plan: \`node jules_client.mjs approve-plan ${id}\`
+- To send a message: \`node jules_client.mjs send-message ${id} "Your answer"\`
+
+Maintain strict token hygiene. Keep answers concise, direct, and purely technical.`;
 
   writeFileSync(taskPath, taskContent, 'utf8');
 
-  const MODEL_CHAIN = [
-    'google-direct/gemini-3.5-flash-lite',
-    'moonshot/kimi-k3'
-  ];
+  const TIER1_MODEL = 'google-direct/gemini-3.5-flash-lite';
+  const TIER2_MODEL = 'moonshot/kimi-k3';
 
   let lastError = null;
-  for (const model of MODEL_CHAIN) {
-    try {
+
+  // Tier 1: Gemini Flash Lite triage
+  try {
+    const result = execFileSync('openclaw', [
+      'agent',
+      '--agent', 'main',
+      '--session-key', `agent:main:subagent:jules-t1-${id}`,
+      '--model', TIER1_MODEL,
+      '--message-file', taskPath
+    ], { timeout: 60000, encoding: 'utf8' });
+
+    console.log(`[Jules Notifier] Tier 1 (${TIER1_MODEL}) completed for session ${id}`);
+
+    // Check if Tier 1 deferred to Tier 2
+    if (result.includes('DEFER_TO_KIMI_K3')) {
+      const deferMatch = result.match(/DEFER_TO_KIMI_K3:\s*(.+)/);
+      const deferReason = deferMatch ? deferMatch[1].trim() : 'Complex task requiring deep reasoning';
+      console.log(`[Jules Notifier] Tier 1 deferred to Tier 2: ${deferReason}`);
+
+      // Tier 2: Kimi k3 deep reasoning handover
+      const tier2TaskPath = join(tmpdir(), `jules-task-t2-${id}.txt`);
+      const tier2Content = `[Subagent Task]
+You are the JULES_ORCHESTRATOR_TIER2 (Kimi k3). You are receiving a complex task deferred from Tier 1 triage.
+
+## Original Session Context
+Session ID: ${id}
+Defer Reason: ${deferReason}
+
+## Tier 1 Analysis
+${result.slice(0, 2000)}
+
+## Instructions
+1. Inspect the session activities and git patch via \`node jules_client.mjs list-activities ${id}\`.
+2. Apply deep architectural and security reasoning to resolve the blocker.
+3. If approving a plan, run: \`node jules_client.mjs approve-plan ${id}\`.
+4. If providing a technical answer, run: \`node jules_client.mjs send-message ${id} "<your detailed technical answer>"\`.
+5. Output a concise summary of the decision made.`;
+
+      writeFileSync(tier2TaskPath, tier2Content, 'utf8');
+
       execFileSync('openclaw', [
         'agent',
         '--agent', 'main',
-        '--session-key', `agent:main:subagent:jules-${id}`,
-        '--model', model,
+        '--session-key', `agent:main:subagent:jules-t2-${id}`,
+        '--model', TIER2_MODEL,
+        '--message-file', tier2TaskPath
+      ], { timeout: 120000, encoding: 'utf8' });
+
+      console.log(`[Jules Notifier] Tier 2 (${TIER2_MODEL}) completed for session ${id}`);
+    }
+
+    return; // Success
+  } catch (e) {
+    lastError = e;
+    console.warn(`[Jules Notifier] Tier 1 failed for session ${id}: ${e.message}`);
+
+    // Fallback: try Tier 2 directly if Tier 1 crashed
+    try {
+      console.log(`[Jules Notifier] Attempting direct Tier 2 fallback for session ${id}...`);
+      execFileSync('openclaw', [
+        'agent',
+        '--agent', 'main',
+        '--session-key', `agent:main:subagent:jules-direct-t2-${id}`,
+        '--model', TIER2_MODEL,
         '--message-file', taskPath
-      ], { timeout: 60000 });
-      console.log(`[Jules Notifier] Successfully spawned orchestrator subagent for session ${id} (model: ${model})`);
-      return; // Success — exit the retry loop
-    } catch (e) {
-      lastError = e;
-      console.warn(`[Jules Notifier] Orchestrator failed with ${model} for session ${id}: ${e.message}`);
+      ], { timeout: 120000, encoding: 'utf8' });
+      console.log(`[Jules Notifier] Direct Tier 2 fallback succeeded for session ${id}`);
+      return;
+    } catch (t2Err) {
+      console.error(`[Jules Notifier] Direct Tier 2 fallback also failed for session ${id}:`, t2Err.message);
+      lastError = t2Err;
     }
   }
 
-  console.error(`[Jules Notifier] All ${MODEL_CHAIN.length} models failed for session ${id}`);
   throw lastError;
 }
 
@@ -135,7 +250,6 @@ function extractPullRequests(session) {
       });
     }
   }
-  // Fallback: check activities for PR creation events
   if (prs.length === 0 && Array.isArray(session.activities)) {
     for (const act of session.activities) {
       if (act.pullRequest) {
@@ -150,9 +264,6 @@ function extractPullRequests(session) {
   return prs;
 }
 
-/**
- * Extract the last prompt or question asked by Jules when waiting for user feedback
- */
 function extractLastJulesMessage(session) {
   if (!session.activities || !Array.isArray(session.activities)) return '';
   for (let i = session.activities.length - 1; i >= 0; i--) {
@@ -163,37 +274,30 @@ function extractLastJulesMessage(session) {
   return '';
 }
 
-/**
- * Handle a single session's state changes, stage PRs, and send Discord notifications
- */
 function handleSessionUpdate(session, lastState) {
   const state = session.state;
   const id = session.name ? session.name.split('/').pop() : session.id;
   const title = session.title || 'Untitled Task';
   const repoName = session.sourceContext?.githubRepo?.repo || session.sourceContext?.source || 'Repository';
 
-  // 1. If session is COMPLETED, stage PRs in state
   if (state === 'COMPLETED') {
     const prs = extractPullRequests(session);
     for (const pr of prs) {
-      if (pr.url) {
-        if (!savedState.prs[pr.url]) {
-          savedState.prs[pr.url] = {
-            status: PR_STATUS_AWAITING,
-            url: pr.url,
-            title: pr.title,
-            branch: pr.branch,
-            repo: repoName,
-            sessionId: id,
-            recordedAt: new Date().toISOString()
-          };
-          console.log(`[Jules Notifier] Staged PR in state: ${pr.url} [${PR_STATUS_AWAITING}]`);
-        }
+      if (pr.url && !savedState.prs[pr.url]) {
+        savedState.prs[pr.url] = {
+          status: PR_STATUS_AWAITING,
+          url: pr.url,
+          title: pr.title,
+          branch: pr.branch,
+          repo: repoName,
+          sessionId: id,
+          recordedAt: new Date().toISOString()
+        };
+        console.log(`[Jules Notifier] Staged PR in state: ${pr.url} [${PR_STATUS_AWAITING}]`);
       }
     }
   }
 
-  // 2. State Transition Alerts
   if (state !== lastState) {
     if (state === 'COMPLETED') {
       const prs = extractPullRequests(session);
@@ -202,15 +306,12 @@ function handleSessionUpdate(session, lastState) {
       alertText += `> **ID:** \`${id}\`\n`;
 
       if (prs.length > 0) {
-        alertText += `\n🚀 **Pull Request(s) Processed via Kimi k3 Gatekeeper:**\n`;
+        alertText += `\n🚀 **Pull Request(s) Staged for Audit Gatekeeper:**\n`;
         for (const pr of prs) {
           alertText += `> 🔗 ${pr.url}\n`;
           alertText += `> **Title:** *${pr.title}*\n`;
-          alertText += `> **Status:** \`${savedState.prs[pr.url]?.status || 'KIMI_K3_AUDITED_AND_MERGED'}\`\n`;
+          alertText += `> **Status:** \`${savedState.prs[pr.url]?.status || 'AUDIT_REQUIRED'}\`\n`;
         }
-        alertText += `\n*Automated Security Audit & Monorepo Test Verification Completed.*`;
-      } else {
-        alertText += `\n*No PR output detected. VANTAGE local verification is primed.*`;
       }
       sendDiscordAlert(alertText);
     } else if (state === 'FAILED') {
@@ -218,9 +319,6 @@ function handleSessionUpdate(session, lastState) {
       alertText += `> **Repo:** \`${repoName}\`\n`;
       alertText += `> **ID:** \`${id}\`\n`;
       alertText += `> **Task:** *${title}*\n`;
-      if (session.error) {
-        alertText += `> **Error:** \`${JSON.stringify(session.error)}\`\n`;
-      }
       sendDiscordAlert(alertText);
     } else if (state === 'AWAITING_USER_FEEDBACK' || state === 'REQUIRES_APPROVAL') {
       const lastMsg = extractLastJulesMessage(session);
@@ -231,24 +329,12 @@ function handleSessionUpdate(session, lastState) {
       if (lastMsg) {
         alertText += `**Jules Request:**\n\`\`\`\n${lastMsg.slice(0, 1500)}\n\`\`\`\n`;
       }
-      alertText += `🤖 *Autonomous OpenClaw subagent triggered to inspect diffs and resolve blocker.*`;
+      alertText += `🤖 *Tiered Orchestrator (Flash Lite ➔ Kimi k3) triggered to resolve blocker.*`;
       sendDiscordAlert(alertText);
     }
   }
 }
 
-/**
- * Main Notifier Loop
- *
- * Optimization: uses listSessions summary state to avoid redundant
- * getSession API calls. Only fetches full session details when:
- *   1. A session's summary state differs from cached state (transition detected)
- *   2. A session is new (not in cached state)
- *   3. A session transitioned to COMPLETED (need full payload for PR extraction)
- *
- * Sessions already known-COMPLETED/FAILED with matching summary state
- * are carried forward without an API call.
- */
 async function checkJulesSessions() {
   assertNoAutoMerge();
 
@@ -270,10 +356,8 @@ async function checkJulesSessions() {
     try {
       const cached = savedState.sessions[s.id];
       const lastSeenState = cached && typeof cached === 'object' ? cached.state : cached;
-      const summaryState = s.state; // State from listSessions summary payload
+      const summaryState = s.state;
 
-      // Fast path: session is already known-COMPLETED/FAILED and summary agrees.
-      // No need to burn a getSession API call — carry forward cached data.
       const isTerminal = (st) => st === 'COMPLETED' || st === 'FAILED';
       if (isTerminal(lastSeenState) && isTerminal(summaryState) && lastSeenState === summaryState) {
         updatedSessionsMap[s.id] = {
@@ -285,33 +369,39 @@ async function checkJulesSessions() {
         continue;
       }
 
-      // Slow path: state transition detected, new session, or non-terminal state.
-      // Fetch full session payload for PR extraction, prompt text, and alerts.
       const fullSession = await getSession(s.id);
       const stateChanged = fullSession.state !== lastSeenState;
       const alreadyOrchestrated = stateChanged ? false : (cached && typeof cached === 'object' ? cached.orchestrated : false);
 
       handleSessionUpdate(fullSession, lastSeenState);
 
-      // Trigger autonomous subagent turn if Jules is blocked and hasn't been orchestrated for this state yet
       let nowOrchestrated = alreadyOrchestrated;
+      const sessionData = cached && typeof cached === 'object' ? cached : {};
+
       if ((fullSession.state === 'AWAITING_USER_FEEDBACK' || fullSession.state === 'REQUIRES_APPROVAL') && !alreadyOrchestrated) {
-        console.log(`[Jules Notifier] Jules session ${s.id} entered ${fullSession.state}. Triggering autonomous subagent orchestrator...`);
-        try {
-          await triggerOrchestrator(s.id);
-          nowOrchestrated = true;
-        } catch (orchErr) {
-          console.error(`[Jules Notifier] Orchestrator failed to execute for session ${s.id}:`, orchErr.message);
-          nowOrchestrated = false;
+        if (isOrchestratorInBackoff(sessionData)) {
+          console.log(`[Jules Notifier] Session ${s.id} is in orchestrator backoff until ${sessionData.orchestratorNextRetryAt} — skipping this sweep`);
+        } else if (sessionData.orchestratorBlocked) {
+          console.warn(`[Jules Notifier] Session ${s.id} is ORCHESTRATOR_BLOCKED — requires manual intervention`);
+        } else {
+          console.log(`[Jules Notifier] Jules session ${s.id} entered ${fullSession.state}. Triggering Tiered Orchestrator...`);
+          try {
+            await triggerOrchestrator(s.id);
+            nowOrchestrated = true;
+            resetOrchestratorRetries(sessionData);
+          } catch (orchErr) {
+            console.error(`[Jules Notifier] Orchestrator failed for session ${s.id}:`, orchErr.message);
+            nowOrchestrated = false;
+            recordOrchestratorFailure(sessionData, orchErr);
+          }
         }
       }
 
-      // Preserve metadata fields if present
       updatedSessionsMap[s.id] = {
-        ...(cached && typeof cached === 'object' ? cached : {}),
+        ...sessionData,
         state: fullSession.state,
-        title: fullSession.title || (cached && typeof cached === 'object' ? cached.title : undefined),
-        repo: fullSession.sourceContext?.githubRepo?.repo || (cached && typeof cached === 'object' ? cached.repo : undefined),
+        title: fullSession.title || sessionData.title,
+        repo: fullSession.sourceContext?.githubRepo?.repo || sessionData.repo,
         orchestrated: nowOrchestrated
       };
     } catch (e) {
@@ -322,17 +412,24 @@ async function checkJulesSessions() {
     }
   }
 
-  // Save state back atomically via unified state manager
-  try {
+  await withStateLock(async () => {
     savedState.sessions = updatedSessionsMap;
     saveStateRaw(savedState);
     console.log(`[Jules Notifier] Checked and updated state file successfully. (${apiCallsSaved} redundant API calls skipped)`);
-  } catch (writeErr) {
-    console.error('[Jules Notifier] Failed to persist state file:', writeErr.message);
+  });
+
+  // Auto-trigger gatekeeper if any PRs are pending audit
+  const pendingPrs = Object.values(savedState.prs || {}).filter(p => p.status === 'KIMI_K3_AUDIT_REQUIRED');
+  if (pendingPrs.length > 0) {
+    console.log(`[Jules Notifier] ${pendingPrs.length} PR(s) pending audit — triggering merge gatekeeper pass...`);
+    try {
+      execFileSync('node', ['jules_merge_gatekeeper.mjs'], { timeout: 300000, stdio: 'inherit' });
+    } catch (gateErr) {
+      console.error('[Jules Notifier] Gatekeeper execution error:', gateErr.message);
+    }
   }
 }
 
-// Execute check
 checkJulesSessions().catch(err => {
   console.error('[Jules Notifier] Fatal unhandled error:', err);
   process.exit(1);

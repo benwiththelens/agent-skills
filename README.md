@@ -20,17 +20,16 @@ and they become available on demand.
 
 ---
 
-## 🚀 Featured: Autonomous Jules Pipeline v2+
+## 🚀 Featured: Autonomous Jules Pipeline v3 & Codebase Health Engine
 
 The `jules-dispatch` skill provides a complete, event-driven development
-architecture for [Google Jules](https://jules.google.com). Key capabilities:
+and maintenance architecture for [Google Jules](https://jules.google.com). Key capabilities:
 
-- **Graphify AST Code Intelligence:** Automatically queries TypeScript AST indexes and injects exact symbols, type exports, and file dependencies into prompts.
-- **Queue Dispatcher & Quota Governor:** Enforces daily safety caps (80/100) with a 20-session manual reserve, priority ordering (`critical → high → medium → low`), and `depends_on` prerequisite gating.
-- **Autonomous Feedback Resolution:** When Jules pauses for user input or plan approvals, an automated subagent inspects the git patch and resolves blockers via a resilient model fallback chain (`gemini-3.5-flash-lite` → `kimi-k3`).
-- **Summary-State Polling Optimization:** The notifier checks summary state flags to skip redundant API calls for terminal sessions, minimizing latency and quota usage.
-- **Multi-Model Audit & Merge Gatekeeper:** 3-phase automated gatekeeper with high-reasoning security audits, blast-radius human review triggers (CI/CD, secrets, auth), automatic lockfile conflict healing, full monorepo test enforcement (`npm test`), auto-merging, and rollback tagging.
-- **Unified State Engine & Rolling Compaction:** Atomic state updates, sub-50KB active state footprint, and monthly history archiving.
+- **Tiered Complexity Cascade (Flash Lite ➔ Kimi k3):** Fast, near-zero-cost triage via Gemini Flash Lite for routine plan approvals and simple queries; structured `DEFER_TO_KIMI_K3` handover for complex architectural decisions and deep logic.
+- **Automated Codebase Health Engine (`generate_maintenance_specs.mjs`):** Scans repositories for missing Row-Level Security (RLS), TypeScript `any` types, and test gaps, staging atomic specs to maximize your 100 session/day Jules quota.
+- **Advisory State Locking (`.lock`):** Prevents cross-process collisions between background cron daemons with retry jitter and stale-lock recovery.
+- **Graphify AST 10KB Budgeting:** Automatically injects exact symbols, type exports, and file dependencies into prompts under a strict 10 KB ceiling to prevent token inflation.
+- **Multi-Model Audit & Merge Gatekeeper:** 3-phase automated gatekeeper with 60-second git subprocess ceilings, security audits, blast-radius human review triggers (CI/CD, secrets, auth), automatic lockfile conflict healing, full monorepo test enforcement (`npm test`), auto-merging, and rollback tagging.
 
 See [`original/jules-dispatch/DESIGN_SPEC.md`](original/jules-dispatch/DESIGN_SPEC.md)
 for the full architecture specification.
@@ -43,15 +42,16 @@ for the full architecture specification.
 agent-skills/
 ├── original/        # Skills authored from scratch by benwiththelens
 │   ├── jules-dispatch/
-│   │   ├── SKILL.md                 # Entrypoint documentation
-│   │   ├── DESIGN_SPEC.md            # Comprehensive architecture specification
-│   │   ├── jules_dispatcher.mjs      # Queue dispatcher & AST enricher
-│   │   ├── jules_notifier.mjs        # Session monitor & feedback orchestrator
-│   │   ├── jules_merge_gatekeeper.mjs# LLM security audit, test runner & auto-merge
-│   │   ├── jules_state_manager.mjs   # Atomic state engine & rolling compaction
-│   │   ├── jules_client.mjs          # Zero-dependency Google Jules API client
-│   │   ├── jules_discord.mjs         # Shared Discord alerting transport
-│   │   └── jules_gate.mjs            # Dormant trigger gate (superseded by notifier)
+│   │   ├── SKILL.md                     # Entrypoint documentation
+│   │   ├── DESIGN_SPEC.md                # Comprehensive architecture specification
+│   │   ├── generate_maintenance_specs.mjs# Codebase health & janitor spec generator
+│   │   ├── jules_dispatcher.mjs          # Queue dispatcher & AST enricher (10KB ceiling)
+│   │   ├── jules_notifier.mjs            # Session monitor & Tiered Complexity Cascade
+│   │   ├── jules_merge_gatekeeper.mjs    # LLM security audit, test runner & auto-merge
+│   │   ├── jules_state_manager.mjs       # Advisory file locking & rolling compaction
+│   │   ├── jules_client.mjs              # Zero-dependency Google Jules API client
+│   │   ├── jules_discord.mjs             # Shared Discord alerting transport
+│   │   └── jules_gate.mjs                # Dormant trigger gate (superseded by notifier)
 │   ├── server-ops/
 │   └── catalyst-ingest/
 ├── curated/         # Community skills, reviewed & hardened
@@ -109,7 +109,7 @@ openclaw skills check
 
 | Skill             | Path                        | Description                                                        |
 | ----------------- | --------------------------- | ------------------------------------------------------------------ |
-| `jules-dispatch`  | `original/jules-dispatch/`  | Autonomous Jules Pipeline v2+ — queue dispatcher with Graphify AST, quota governor, subagent feedback orchestrator, rolling state compaction, and multi-model audit & merge gatekeeping. |
+| `jules-dispatch`  | `original/jules-dispatch/`  | Autonomous Jules Pipeline v3 — Tiered Complexity Cascade (Flash Lite ➔ Kimi k3), codebase health spec generator, advisory state locking, and multi-model audit & merge gatekeeper. |
 | `server-ops`      | `original/server-ops/`      | Headless server/container operations: health, logs, Docker lifecycle.  |
 | `catalyst-ingest` | `original/catalyst-ingest/` | Structured ingestion pipeline for raw captures into the knowledge vault. |
 
