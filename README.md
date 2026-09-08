@@ -53,7 +53,8 @@ agent-skills/
 │   │   ├── jules_discord.mjs             # Shared Discord alerting transport
 │   │   └── jules_gate.mjs                # Dormant trigger gate (superseded by notifier)
 │   ├── server-ops/
-│   └── catalyst-ingest/
+│   ├── catalyst-ingest/
+│   └── gitea-cli/
 ├── curated/         # Community skills, reviewed & hardened
 │   ├── papercuts/
 │   ├── voice-builder/
@@ -112,6 +113,7 @@ openclaw skills check
 | `jules-dispatch`  | `original/jules-dispatch/`  | Autonomous Jules Pipeline v3 — Tiered Complexity Cascade (Flash Lite ➔ Kimi k3), codebase health spec generator, advisory state locking, and multi-model audit & merge gatekeeper. |
 | `server-ops`      | `original/server-ops/`      | Headless server/container operations: health, logs, Docker lifecycle.  |
 | `catalyst-ingest` | `original/catalyst-ingest/` | Structured ingestion pipeline for raw captures into the knowledge vault. |
+| `gitea-cli`       | `original/gitea-cli/`       | Working a self-hosted Gitea repo from the CLI with `tea` — issues, PRs and releases where `gh` does not work. |
 
 ### Curated Community Skills — reviewed & hardened
 
