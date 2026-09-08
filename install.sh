@@ -8,7 +8,7 @@
 # Targets (first match wins, or override with --target):
 #   1. ~/.openclaw/workspace/skills/benwiththelens   (OpenClaw)
 #   2. ~/.claude/skills/benwiththelens               (Claude Code)
-#   3. ~/.gemini/skills/benwiththelens               (Agy CLI / Antigravity)
+#   3. ~/.gemini/config/skills/benwiththelens        (Agy CLI / Antigravity)
 #
 # Usage:
 #   ./install.sh                # symlink into detected target
@@ -49,8 +49,8 @@ if [[ -z "$TARGET" ]]; then
     TARGET="$HOME/.openclaw/workspace/skills"
   elif [[ -d "$HOME/.claude/skills" ]]; then
     TARGET="$HOME/.claude/skills"
-  elif [[ -d "$HOME/.gemini/skills" ]]; then
-    TARGET="$HOME/.gemini/skills"
+  elif [[ -d "$HOME/.gemini/config/skills" ]]; then
+    TARGET="$HOME/.gemini/config/skills"
   else
     # Neither runtime found — default to OpenClaw layout and create it.
     TARGET="$HOME/.openclaw/workspace/skills"

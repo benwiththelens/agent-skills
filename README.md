@@ -82,7 +82,7 @@ The installer auto-detects your runtime and **symlinks** the collection into it:
 | ----------- | ----------------------------------------------- |
 | OpenClaw    | `~/.openclaw/workspace/skills/benwiththelens`   |
 | Claude Code | `~/.claude/skills/benwiththelens`               |
-| Agy CLI     | `~/.gemini/skills/benwiththelens`               |
+| Agy CLI     | `~/.gemini/config/skills/benwiththelens`        |
 
 ### Options
 
