@@ -7,7 +7,7 @@
 ┌──────────────────────────────────────────────────────────────┐
 │  benwiththelens / agent-skills                               │
 │  ─────────────────────────────────────────────               │
-│  Runtime targets: OpenClaw · Claude Code                     │
+│  Runtime targets: OpenClaw · Claude Code · Agy CLI           │
 │  License: MIT                                                │
 │  Status:  ACTIVE MAINTENANCE                                 │
 └──────────────────────────────────────────────────────────────┘
@@ -60,7 +60,6 @@ agent-skills/
 │   ├── voice-builder/
 │   ├── self-improving-agent/
 │   └── obsidian-skills/
-├── scripts/         # Maintenance / sync / validation tooling
 ├── install.sh       # One-shot installer (symlink or copy)
 └── README.md        # Master repository index
 ```
@@ -83,6 +82,7 @@ The installer auto-detects your runtime and **symlinks** the collection into it:
 | ----------- | ----------------------------------------------- |
 | OpenClaw    | `~/.openclaw/workspace/skills/benwiththelens`   |
 | Claude Code | `~/.claude/skills/benwiththelens`               |
+| Agy CLI     | `~/.gemini/skills/benwiththelens`               |
 
 ### Options
 
