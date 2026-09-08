@@ -128,6 +128,22 @@ openclaw skills check
 > credit and license notices inside each skill directory. Modifications for
 > hardening, portability, or runtime compatibility are documented per-skill.
 
+### Recommended Companions — installed alongside, not vendored
+
+Actively maintained upstream and one command to install. Deliberately **not**
+copied into this repo: vendoring an upstream that ships fixes weekly buys a stale
+fork and nothing else. Install them directly.
+
+| Collection | What it gives you | Install |
+| --- | --- | --- |
+| [`jakubkrehel/skills`](https://github.com/jakubkrehel/skills) | 11 design-engineering skills — typography, colour systems, layout, accessibility, product writing, interface review, component variants. MIT. | `npx skills add jakubkrehel/skills` |
+| [`inkboard/system-atlas`](https://github.com/inkboard/system-atlas) | Interactive isometric architecture atlas plus a generated `SYSTEM.md`, both from one data file. MIT. | `npx skills add inkboard/system-atlas` |
+
+Read each `SKILL.md` before it goes live. A skill is instructions your agent will
+follow, auto-loaded on description match — installing one is a trust decision, not
+a dependency decision, and an MIT licence says nothing about what the prompts tell
+your agent to do.
+
 ---
 
 ## 🛠️ Development
